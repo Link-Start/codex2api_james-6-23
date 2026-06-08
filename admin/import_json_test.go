@@ -2,12 +2,18 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
 
@@ -119,10 +125,51 @@ func TestParseImportJSONTokensSupportsSub2API(t *testing.T) {
 	}
 }
 
+func TestParseImportJSONTokensSupportsSub2APINumericExpiresAt(t *testing.T) {
+	data := []byte(`{
+		"accounts": [
+			{
+				"name": "Numeric Expiry",
+				"credentials": {
+					"refresh_token": "rt-numeric",
+					"access_token": "at-numeric",
+					"expires_at": 1779071020
+				}
+			}
+		]
+	}`)
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+
+	if len(tokens) != 1 {
+		t.Fatalf("tokens len = %d, want 1", len(tokens))
+	}
+	if tokens[0].expiresAt != "1779071020" {
+		t.Fatalf("expiresAt = %q, want numeric value preserved", tokens[0].expiresAt)
+	}
+}
+
+func TestParseCredentialExpiresAtSupportsUnixSeconds(t *testing.T) {
+	got := parseCredentialExpiresAt("1779071020").UTC()
+	want := time.Unix(1779071020, 0).UTC()
+	if !got.Equal(want) {
+		t.Fatalf("parseCredentialExpiresAt = %s, want %s", got, want)
+	}
+}
+
 func TestParseImportJSONTokensPreservesCPAFields(t *testing.T) {
 	data := []byte(`{
 		"type": "codex",
 		"email": "cpa@example.com",
+		"plan_type": "free",
+		"codex_7d_used_percent": 3,
+		"codex_7d_reset_at": "2026-05-15T20:33:11+08:00",
+		"codex_5h_used_percent": 0,
+		"codex_5h_reset_at": "2026-05-11T11:39:07+08:00",
+		"codex_usage_updated_at": "2026-05-11T11:39:07+08:00",
 		"expired": "2026-04-25T12:00:00Z",
 		"id_token": "id-cpa",
 		"account_id": "acc-cpa",
@@ -145,8 +192,49 @@ func TestParseImportJSONTokensPreservesCPAFields(t *testing.T) {
 	if token.email != "cpa@example.com" || token.name != "cpa@example.com" {
 		t.Fatalf("identity = name:%q email:%q, want cpa@example.com", token.name, token.email)
 	}
+	if token.planType != "free" {
+		t.Fatalf("planType = %q, want free", token.planType)
+	}
+	if token.codex7DUsedPercent != "3" || token.codex7DResetAt != "2026-05-15T20:33:11+08:00" {
+		t.Fatalf("7d usage = %q/%q, want 3/reset", token.codex7DUsedPercent, token.codex7DResetAt)
+	}
+	if token.codex5HUsedPercent != "0" || token.codex5HResetAt != "2026-05-11T11:39:07+08:00" {
+		t.Fatalf("5h usage = %q/%q, want 0/reset", token.codex5HUsedPercent, token.codex5HResetAt)
+	}
+	if token.codexUsageUpdatedAt != "2026-05-11T11:39:07+08:00" {
+		t.Fatalf("usageUpdatedAt = %q, want timestamp", token.codexUsageUpdatedAt)
+	}
 	if token.idToken != "id-cpa" || token.accountID != "acc-cpa" || token.expiresAt != "2026-04-25T12:00:00Z" {
 		t.Fatalf("metadata = %+v, want CPA token metadata preserved", token)
+	}
+}
+
+func TestAccountFromCredentialSeedRestoresUsageSnapshots(t *testing.T) {
+	account := accountFromCredentialSeed(42, "", tokenCredentialSeed{
+		planType:            "free",
+		codex7DUsedPercent:  "3",
+		codex7DResetAt:      "2026-05-15T20:33:11+08:00",
+		codex5HUsedPercent:  "0",
+		codex5HResetAt:      "2026-05-11T11:39:07+08:00",
+		codexUsageUpdatedAt: "2026-05-11T11:39:07+08:00",
+	})
+
+	if got := account.GetPlanType(); got != "free" {
+		t.Fatalf("PlanType = %q, want free", got)
+	}
+	pct7d, ok := account.GetUsagePercent7d()
+	if !ok || pct7d != 3 {
+		t.Fatalf("7d usage = %v/%t, want 3/true", pct7d, ok)
+	}
+	if account.GetReset7dAt().IsZero() {
+		t.Fatal("Reset7dAt is zero")
+	}
+	pct5h, ok := account.GetUsagePercent5h()
+	if !ok || pct5h != 0 {
+		t.Fatalf("5h usage = %v/%t, want 0/true", pct5h, ok)
+	}
+	if account.GetReset5hAt().IsZero() {
+		t.Fatal("Reset5hAt is zero")
 	}
 }
 
@@ -215,6 +303,20 @@ func TestReadUploadedImportFilesReadsRepeatedFileFields(t *testing.T) {
 	}
 }
 
+func TestValidateImportFileSize(t *testing.T) {
+	if err := validateImportFileSize(&multipart.FileHeader{Filename: "ok.txt", Size: importFileSizeLimitBytes}); err != nil {
+		t.Fatalf("validateImportFileSize returned error for boundary size: %v", err)
+	}
+
+	err := validateImportFileSize(&multipart.FileHeader{Filename: "too-big.txt", Size: importFileSizeLimitBytes + 1})
+	if err == nil {
+		t.Fatal("expected oversized file error, got nil")
+	}
+	if got, want := err.Error(), "文件 too-big.txt 大小超过 20MB"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
 func TestImportAccountsJSONReturnsExistingNoTokenMessageForUnsupportedJSON(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -260,6 +362,137 @@ func TestImportAccountsJSONRejectsInvalidJSONFile(t *testing.T) {
 	}
 	if got := payload["error"]; got != "文件 broken.json 不是有效的 JSON 格式" {
 		t.Fatalf("error = %q, want %q", got, "文件 broken.json 不是有效的 JSON 格式")
+	}
+}
+
+func TestImportAccountsCommonTriggersUsageProbeForImportedAccountWithAccessToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	probed := make(chan int64, 1)
+	handler := &Handler{
+		db:    db,
+		store: store,
+		probeUsage: func(_ context.Context, acc *auth.Account) error {
+			probed <- acc.DBID
+			return nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
+
+	handler.importAccountsCommon(ctx, []importToken{{
+		refreshToken: "rt-import-probe",
+		accessToken:  "at-import-probe",
+	}}, "")
+
+	select {
+	case id := <-probed:
+		if id == 0 {
+			t.Fatal("probed account id is zero")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("usage probe was not triggered for imported account with access token")
+	}
+}
+
+func TestImportAccountsCommonRefreshesAndProbesRTOnlyImport(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	probed := make(chan int64, 1)
+	handler := &Handler{
+		db:    db,
+		store: store,
+		refreshAccount: func(_ context.Context, id int64) error {
+			acc := store.FindByID(id)
+			if acc == nil {
+				return fmt.Errorf("account %d not found", id)
+			}
+			acc.Mu().Lock()
+			acc.AccessToken = "at-refreshed"
+			acc.Mu().Unlock()
+			return nil
+		},
+		probeUsage: func(_ context.Context, acc *auth.Account) error {
+			probed <- acc.DBID
+			return nil
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
+
+	handler.importAccountsCommon(ctx, []importToken{{refreshToken: "rt-import-refresh-probe"}}, "")
+
+	select {
+	case id := <-probed:
+		if id == 0 {
+			t.Fatal("probed account id is zero")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("usage probe was not triggered after RT-only import refresh")
+	}
+}
+
+func TestAddAccountStreamReportsProgressAndProbesAfterRefresh(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	probed := make(chan int64, 2)
+	handler := &Handler{
+		db:    db,
+		store: store,
+		refreshAccount: func(_ context.Context, id int64) error {
+			acc := store.FindByID(id)
+			if acc == nil {
+				return fmt.Errorf("account %d not found", id)
+			}
+			acc.Mu().Lock()
+			acc.AccessToken = fmt.Sprintf("at-%d", id)
+			acc.Mu().Unlock()
+			return nil
+		},
+		probeUsage: func(_ context.Context, acc *auth.Account) error {
+			probed <- acc.DBID
+			return nil
+		},
+	}
+
+	body := bytes.NewBufferString(`{"refresh_token":"rt-stream-1\nrt-stream-2"}`)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts?stream=true", body)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.AddAccount(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+	payload := recorder.Body.String()
+	if !strings.Contains(payload, `"type":"complete"`) || !strings.Contains(payload, `"success":2`) {
+		t.Fatalf("SSE payload = %q, want complete success=2", payload)
+	}
+
+	seen := map[int64]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case id := <-probed:
+			seen[id] = true
+		case <-deadline:
+			t.Fatalf("usage probes = %v, want 2 accounts probed", seen)
+		}
 	}
 }
 

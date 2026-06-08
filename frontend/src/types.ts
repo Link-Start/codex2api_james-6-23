@@ -11,6 +11,7 @@ export type AccountStatus = 'active' | 'ready' | 'cooldown' | 'error' | 'refresh
 export interface StatsResponse {
   total: number
   available: number
+  rate_limited: number
   error: number
   today_requests: number
 }
@@ -26,9 +27,16 @@ export interface AccountRow {
   id: number
   name: string
   email: string
+  email_domain?: string
   plan_type: string
+  subscription_expires_at?: string
   status: AccountStatus
+  error_message?: string
   at_only?: boolean
+  account_type?: string
+  openai_responses_api?: boolean
+  base_url?: string
+  models?: string[]
   health_tier?: string
   scheduler_score?: number
   dispatch_score?: number
@@ -36,8 +44,11 @@ export interface AccountRow {
   score_bias_effective?: number
   base_concurrency_override?: number | null
   base_concurrency_effective?: number
+  skip_warm_tier?: boolean
   dynamic_concurrency_limit?: number
   allowed_api_key_ids?: number[]
+  tags?: string[]
+  group_ids?: number[]
   scheduler_breakdown?: {
     unauthorized_penalty: number
     rate_limit_penalty: number
@@ -46,7 +57,10 @@ export interface AccountRow {
     failure_penalty: number
     success_bonus: number
     usage_penalty_7d: number
+    usage_urgency_bonus_5h?: number
+    usage_urgency_bonus_7d?: number
     latency_penalty: number
+    success_rate_penalty?: number
   }
   last_unauthorized_at?: ISODateString
   last_rate_limited_at?: ISODateString
@@ -55,20 +69,38 @@ export interface AccountRow {
   proxy_url: string
   created_at: ISODateString
   updated_at: ISODateString
+  codex_usage_updated_at?: ISODateString
   active_requests?: number
   total_requests?: number
   last_used_at?: ISODateString
   success_requests?: number
   error_requests?: number
+  retry_error_requests?: number
+  rate_limit_attempts?: number
   usage_percent_7d?: number | null
   usage_percent_5h?: number | null
+  auto_pause_5h_threshold?: number | null
+  auto_pause_7d_threshold?: number | null
+  auto_pause_5h_disabled?: boolean
+  auto_pause_7d_disabled?: boolean
   usage_5h_detail?: AccountUsageWindow
   usage_7d_detail?: AccountUsageWindow
   reset_5h_at?: ISODateString
   reset_7d_at?: ISODateString
+  billed_5h?: number
+  billed_7d?: number
   cooldown_until?: ISODateString
+  cooldown_reason?: string
+  model_cooldowns?: Array<{
+    model: string
+    reason: string
+    reset_at: ISODateString
+    remaining_seconds: number
+  }>
   enabled?: boolean
   locked?: boolean
+  credit_enabled?: boolean
+  credit_skip_usage_window?: boolean
   // 图片配额信息
   image_quota_remaining?: number
   image_quota_total?: number
@@ -80,7 +112,8 @@ export type AccountsResponse = ApiListResponse<'accounts', AccountRow>
 
 export interface AddAccountRequest {
   name?: string
-  refresh_token: string
+  refresh_token?: string
+  session_token?: string
   proxy_url: string
 }
 
@@ -90,25 +123,129 @@ export interface AddATAccountRequest {
   proxy_url: string
 }
 
+export interface AddOpenAIResponsesAccountRequest {
+  name?: string
+  base_url: string
+  api_key: string
+  models: string[]
+  proxy_url: string
+}
+
+export interface UpdateOpenAIResponsesAccountRequest {
+  name?: string
+  base_url: string
+  api_key?: string
+  models: string[]
+  proxy_url: string
+}
+
+export interface FetchOpenAIResponsesModelsRequest {
+  account_id?: number
+  base_url: string
+  api_key: string
+  proxy_url?: string
+}
+
+export interface FetchOpenAIResponsesModelsResponse {
+  base_url: string
+  models: string[]
+}
+
 export interface UpdateAccountSchedulerRequest {
-  score_bias_override: number | null
-  base_concurrency_override: number | null
+  score_bias_override?: number | null
+  base_concurrency_override?: number | null
+  skip_warm_tier?: boolean
   allowed_api_key_ids?: number[] | null
+  proxy_url?: string | null
+  tags?: string[] | null
+  group_ids?: number[] | null
+  auto_pause_5h_threshold?: number | null
+  auto_pause_7d_threshold?: number | null
+  auto_pause_5h_disabled?: boolean
+  auto_pause_7d_disabled?: boolean
+}
+
+export interface AccountGroup {
+  id: number
+  name: string
+  description: string
+  color: string
+  sort_order: number
+  member_count: number
+  created_at: ISODateString
+  updated_at: ISODateString
+}
+
+export interface AccountGroupsResponse {
+  groups: AccountGroup[]
+}
+
+export interface CreateAccountGroupRequest {
+  name: string
+  description?: string
+  color?: string
+  sort_order?: number
+}
+
+export interface UpdateAccountGroupRequest {
+  name?: string
+  description?: string
+  color?: string
+  sort_order?: number
 }
 
 export interface AccountModelStat {
   model: string
   requests: number
   tokens: number
+  input_tokens: number
+  output_tokens: number
+  reasoning_tokens: number
+  cached_tokens: number
+  account_billed: number
+  user_billed: number
+}
+
+export interface AccountUsageDayStat {
+  date: string
+  label: string
+  requests: number
+  tokens: number
+  account_billed: number
+  user_billed: number
 }
 
 export interface AccountUsageDetail {
+  period_days: number
+  active_days: number
   total_requests: number
   total_tokens: number
   input_tokens: number
   output_tokens: number
   reasoning_tokens: number
   cached_tokens: number
+  cache_hit_rate: number
+  total_account_billed: number
+  total_user_billed: number
+  avg_daily_account_billed: number
+  avg_daily_user_billed: number
+  avg_daily_requests: number
+  avg_daily_tokens: number
+  avg_duration_ms: number
+  avg_first_token_ms: number
+  p95_duration_ms: number
+  error_requests: number
+  error_rate: number
+  retry_requests: number
+  first_token_samples: number
+  stream_requests: number
+  stream_rate: number
+  compact_requests: number
+  compact_rate: number
+  today: AccountUsageDayStat
+  highest_cost_day?: AccountUsageDayStat
+  highest_request_day?: AccountUsageDayStat
+  history: AccountUsageDayStat[]
   models: AccountModelStat[]
 }
 
@@ -128,6 +265,23 @@ export interface HealthResponse {
   status: 'ok' | string
   available: number
   total: number
+}
+
+export interface SiteBranding {
+  site_name: string
+  site_logo: string
+  background_image: string
+  background_opacity: number
+  background_blur: number
+  background_glass_opacity: number
+  background_glass_blur: number
+}
+
+export interface BackgroundUploadResponse {
+  url: string
+  filename: string
+  mime_type: string
+  bytes: number
 }
 
 export interface AccountEventTrendPoint {
@@ -190,30 +344,249 @@ export interface OpsOverviewResponse {
     today_requests: number
     today_tokens: number
     rpm_limit: number
+    avg_duration_ms: number
+  }
+}
+
+export type RuntimeHealthStatus = 'ok' | 'degraded' | 'error' | string
+
+export interface RuntimeCheck {
+  component: string
+  status: RuntimeHealthStatus
+  code: string
+  message: string
+}
+
+export interface RuntimeStatusResponse {
+  updated_at: ISODateString
+  status: RuntimeHealthStatus
+  service: {
+    status: RuntimeHealthStatus
+    service_url: string
+    admin_url: string
+    api_base_url: string
+    uptime_seconds: number
+    goroutines: number
+    go_version: string
+    os: string
+    arch: string
+    pid: number
+  }
+  database: {
+    status: RuntimeHealthStatus
+    driver: string
+    label: string
+    location: string
+    healthy: boolean
+    error?: string
+    open: number
+    in_use: number
+    idle: number
+    max_open: number
+    wait_count: number
+    usage_percent: number
+  }
+  cache: {
+    status: RuntimeHealthStatus
+    driver: string
+    label: string
+    healthy: boolean
+    error?: string
+    total_conns: number
+    idle_conns: number
+    stale_conns: number
+    pool_size: number
+    usage_percent: number
+  }
+  usage_log: {
+    status: RuntimeHealthStatus
+    mode: string
+    enabled: boolean
+    batch_size: number
+    flush_interval_seconds: number
+    buffer_length: number
+    buffer_capacity: number
+  }
+  probes: {
+    status: RuntimeHealthStatus
+    lazy_mode: boolean
+    background_refresh_interval_minutes: number
+	    usage_probe_max_age_minutes: number
+	    usage_probe_concurrency: number
+	    usage_probe_responses_fallback_enabled: boolean
+	    recovery_probe_interval_minutes: number
+    usage_probe_running: boolean
+    recovery_probe_running: boolean
+    auto_cleanup_running: boolean
+  }
+  accounts: {
+    status: RuntimeHealthStatus
+    total: number
+    available: number
+    active_requests: number
+    total_requests: number
+    status_counts: Record<string, number>
+  }
+  image_storage: {
+    status: RuntimeHealthStatus
+    backend: string
+    local_dir?: string
+    bucket?: string
+    prefix?: string
+    healthy: boolean
+    error?: string
+  }
+  admin_auth: {
+    status: RuntimeHealthStatus
+    source: string
+    configured: boolean
+  }
+  checks: RuntimeCheck[]
+}
+
+export interface ResetRadarResponse {
+  source_name: string
+  source_url: string
+  rss_url: string
+  current_status_url: string
+  fetched_at: ISODateString
+  cached: boolean
+  schema_version: string
+  status: string
+  window_open: boolean
+  message: string
+  recommended_action: string
+  checked_at: ISODateString
+  monitored_at: ISODateString
+  current_window: {
+    state: string
+    message: string
+    opened_at?: ISODateString | null
+    source?: string | null
+  }
+  last_window: {
+    id: string
+    title: string
+    status: string
+    opened_at: ISODateString
+    closed_at: ISODateString
+    window_minutes: number
+    window_human: string
+    scope: string
+    summary: string
+    sources?: Array<{
+      type: string
+      url: string
+    }>
+  }
+  metrics: {
+    last_3_months_window_minutes: number
+    last_3_months_window_human: string
+  }
+  prediction: {
+    level: string
+    probability_24h: number
+    probability_48h: number
+    expected_window: string
+    reasoning_summary: string
+    should_notify: boolean
+    updated_at: ISODateString
+    source: string
+    signal_summary_24h: {
+      total: number
+      counts: {
+        openai_status: number
+        official_x: number
+        community_x: number
+        x_reply: number
+        market_x: number
+      }
+      top_signals?: Array<{
+        source: string
+        score: number
+        text: string
+        url: string
+      }>
+    }
+  }
+  feed: {
+    title: string
+    description: string
+    last_build_date: string
+    ttl: number
+    error?: string
+    items: Array<{
+      title: string
+      link: string
+      guid: string
+      pub_date: string
+      published_at: ISODateString
+      summary: string
+      event: 'open' | 'close' | 'info' | string
+    }>
+  }
+  hook: {
+    signal_detected: boolean
+    signal_id?: string
+    signal_type?: 'close' | string
+    triggered: boolean
+    running: boolean
+    last_triggered_signal_id?: string
+    last_triggered_at?: ISODateString
+    last_completed_at?: ISODateString
+    message: string
+    last_result?: {
+      total: number
+      success: number
+      failed: number
+      banned: number
+      rate_limited: number
+      error?: string
+    } | null
   }
 }
 
 export interface SystemSettings {
+  site_name: string
+  site_logo: string
+  background_image: string
+  background_opacity: number
+  background_blur: number
+  background_glass_opacity: number
+  background_glass_blur: number
   max_concurrency: number
   global_rpm: number
   test_model: string
   test_concurrency: number
   background_refresh_interval_minutes: number
-  usage_probe_max_age_minutes: number
-  recovery_probe_interval_minutes: number
+	  usage_probe_max_age_minutes: number
+	  usage_probe_concurrency: number
+	  usage_probe_responses_fallback_enabled: boolean
+	  recovery_probe_interval_minutes: number
+  lazy_mode: boolean
   proxy_url?: string
   pg_max_conns: number
   redis_pool_size: number
   auto_clean_unauthorized: boolean
   auto_clean_rate_limited: boolean
   admin_secret: string
+  admin_secret_configured?: boolean
   admin_auth_source: 'env' | 'database' | 'disabled' | string
   auto_clean_full_usage: boolean
   auto_clean_error: boolean
   auto_clean_expired: boolean
   proxy_pool_enabled: boolean
   fast_scheduler_enabled: boolean
+  codex_force_websocket: boolean
+  codex_ws_keepalive_enabled: boolean
+  codex_ws_keepalive_interval_sec: number
+  codex_ws_hide_upstream_errors: boolean
+  codex_ws_silent_retry_enabled: boolean
+  codex_ws_silent_max_retries: number
+  scheduler_mode: string
+  affinity_mode?: string
   max_retries: number
+  max_rate_limit_retries: number
   allow_remote_migration: boolean
   database_driver: string
   database_label: string
@@ -221,6 +594,8 @@ export interface SystemSettings {
   cache_label: string
   expired_cleaned?: number
   model_mapping: string
+  codex_model_mapping: string
+  reasoning_effort_models: string
   resin_url: string
   resin_platform_name: string
   prompt_filter_enabled: boolean
@@ -232,6 +607,50 @@ export interface SystemSettings {
   prompt_filter_sensitive_words: string
   prompt_filter_custom_patterns: string
   prompt_filter_disabled_patterns: string
+  client_compat_mode: 'preserve' | 'auto' | 'force' | string
+  codex_min_cli_version: string
+  usage_log_mode: 'full' | 'errors' | 'off' | string
+  usage_log_batch_size: number
+  usage_log_flush_interval_seconds: number
+  stream_flush_policy: 'immediate' | 'coalesce' | string
+  stream_flush_interval_ms: number
+  first_token_mode: 'strict' | 'loose' | string
+  first_token_timeout_seconds: number
+  billing_tier_policy: 'actual' | 'requested' | string
+  show_full_usage_numbers: boolean
+  image_storage_backend: 'local' | 's3' | string
+  image_s3_endpoint: string
+  image_s3_region: string
+  image_s3_bucket: string
+  image_s3_access_key: string
+  image_s3_secret_key: string
+  image_s3_secret_key_configured?: boolean
+  image_s3_prefix: string
+  image_s3_force_path_style: boolean
+}
+
+export interface SetupHintsResponse {
+  service_url?: string
+  admin_url?: string
+  api_base_url?: string
+  database?: {
+    driver?: string
+    label?: string
+    location?: string
+  }
+  cache?: {
+    driver?: string
+    label?: string
+  }
+  data?: {
+    image_local_dir?: string
+    image_storage_backend?: string
+  }
+  usage?: {
+    log_mode?: string
+    batch_size?: number
+    flush_interval_seconds?: number
+  }
 }
 
 export interface PromptFilterMatch {
@@ -347,17 +766,87 @@ export interface UsageStats {
   total_tokens: number
   total_prompt_tokens: number
   total_completion_tokens: number
+  total_input_tokens?: number
   total_cached_tokens: number
+  total_cache_rate?: number
   total_account_billed: number
   total_user_billed: number
+  avg_account_billed_per_request: number
+  avg_user_billed_per_request: number
   today_requests: number
   today_tokens: number
+  today_input_tokens?: number
+  today_prompt_tokens?: number
+  today_completion_tokens?: number
+  today_cached_tokens?: number
+  today_cache_rate?: number
   today_account_billed: number
   today_user_billed: number
   rpm: number
   tpm: number
   avg_duration_ms: number
+  avg_first_token_ms?: number
   error_rate: number
+  feature_stats: UsageFeatureStats
+  model_stats: UsageModelStat[]
+  endpoint_stats: UsageEndpointStat[]
+  api_key_stats: UsageAPIKeyStat[]
+}
+
+export interface UsageModelStat {
+  model: string
+  requests: number
+  tokens: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  account_billed: number
+  user_billed: number
+  error_count: number
+}
+
+export interface UsageFeatureStats {
+  stream_requests: number
+  sync_requests: number
+  fast_requests: number
+  cache_hit_requests: number
+  reasoning_requests: number
+  image_requests: number
+  retry_requests: number
+  error_requests: number
+}
+
+export interface UsageEndpointStat {
+  endpoint: string
+  requests: number
+  tokens: number
+  error_count: number
+  user_billed: number
+}
+
+export interface UsageAPIKeyStat {
+  api_key_id: number
+  label: string
+  requests: number
+  tokens: number
+  error_count: number
+  user_billed: number
+}
+
+// APIKeyTokenStat 是 /usage/api-keys 端点返回项，比 UsageAPIKeyStat 字段更细
+// （分列 input/output/cached token），且不限条数。
+export interface APIKeyTokenStat {
+  api_key_id: number
+  api_key_name: string
+  api_key_masked: string
+  label: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  total_tokens: number
+  error_count: number
+  user_billed: number
 }
 
 export interface UsageLog {
@@ -379,8 +868,13 @@ export interface UsageLog {
   inbound_endpoint: string
   upstream_endpoint: string
   stream: boolean
+  compact: boolean
+  via_websocket?: boolean
   cached_tokens: number
   service_tier: string
+  requested_service_tier: string
+  actual_service_tier: string
+  billing_service_tier: string
   api_key_id: number
   api_key_name: string
   api_key_masked: string
@@ -402,6 +896,12 @@ export interface UsageLog {
   output_price_per_mtoken: number
   cache_read_price_per_mtoken: number
   rate_multiplier: number
+  long_context?: boolean
+  long_context_threshold?: number
+  is_retry_attempt: boolean
+  attempt_index: number
+  upstream_error_kind: string
+  error_message: string
 }
 
 export type UsageLogsResponse = ApiListResponse<'logs', UsageLog>
@@ -409,6 +909,18 @@ export type UsageLogsResponse = ApiListResponse<'logs', UsageLog>
 export interface UsageLogsPagedResponse {
   logs: UsageLog[]
   total: number
+}
+
+export interface OpsErrorSummary {
+  total_errors: number
+  status_4xx: number
+  status_5xx: number
+  unauthorized: number
+  rate_limited: number
+  canceled: number
+  timeouts: number
+  retry_attempts: number
+  avg_duration_ms: number
 }
 
 export interface ChartTimelinePoint {
@@ -419,7 +931,8 @@ export interface ChartTimelinePoint {
   output_tokens: number
   reasoning_tokens: number
   cached_tokens: number
-  errors_401: number
+  errors_4xx: number
+  errors_5xx: number
 }
 
 export interface ChartModelPoint {
@@ -432,20 +945,62 @@ export interface ChartAggregation {
   models: ChartModelPoint[]
 }
 
+export interface APIKeyLimits {
+  model_allow?: string[]
+  model_deny?: string[]
+  rpm?: number
+  rpd?: number
+  cost_limit_5h?: number
+  cost_limit_7d?: number
+  token_limit_5h?: number
+  token_limit_7d?: number
+}
+
 export interface APIKeyRow {
   id: number
   name: string
   key: string
   raw_key: string
+  quota_limit: number
+  quota_used: number
+  expires_at?: ISODateString | null
+  status?: 'active' | 'expired' | 'quota_exhausted'
+  allowed_group_ids?: number[]
+  limits?: APIKeyLimits
   created_at: ISODateString
 }
 
 export type APIKeysResponse = ApiListResponse<'keys', APIKeyRow>
 
+export interface CreateAPIKeyRequest {
+  name: string
+  key?: string
+  quota_limit?: number
+  quota?: number
+  expires_at?: string
+  expires_in_days?: number
+  allowed_group_ids?: number[]
+  limits?: APIKeyLimits
+}
+
+export interface UpdateAPIKeyRequest {
+  name?: string
+  quota_limit?: number | null
+  quota?: number | null
+  expires_at?: string | null
+  expires_in_days?: number
+  allowed_group_ids?: number[]
+  limits?: APIKeyLimits
+}
+
 export interface CreateAPIKeyResponse {
   id: number
   key: string
   name: string
+  quota_limit: number
+  quota_used: number
+  expires_at?: ISODateString | null
+  allowed_group_ids?: number[]
 }
 
 export interface ImagePromptTemplate {
@@ -545,6 +1100,7 @@ export interface CreateImageJobPayload {
   upscale?: string
   api_key_id?: number
   template_id?: number
+  input_images?: string[]
 }
 
 export type ApiListResponse<K extends string, T> = {

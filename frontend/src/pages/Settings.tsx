@@ -5,12 +5,12 @@ import { api, resetAdminAuthState, setAdminKey } from '../api'
 import { formatBeijingTime, getTimezone, setTimezone } from '../utils/time'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
-import ToastNotice from '../components/ToastNotice'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
-import type { HealthResponse, ModelInfo, SystemSettings } from '../types'
+import type { HealthResponse, ModelInfo, SiteBranding, SystemSettings } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
+import { DEFAULT_SITE_LOGO, isBrandingVideo, sanitizeBrandingImage, sanitizeBrandingLogo, useBranding } from '../branding'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -26,18 +26,32 @@ import {
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 
-import { ExternalLink, RefreshCw, Save, Trash2 } from 'lucide-react'
+import { ExternalLink, RefreshCw, Save, Trash2, Upload, X } from 'lucide-react'
 
 type ModelMappingEntry = [string, string]
+const EMPTY_MODEL_MAPPING_ENTRIES: ModelMappingEntry[] = []
+type ReasoningEffortModelEntry = {
+  model: string
+  effort: string
+}
+type AutoSaveStatus = 'idle' | 'saving' | 'saved' | 'error'
+
+const EMPTY_REASONING_EFFORT_MODEL_ENTRIES: ReasoningEffortModelEntry[] = []
+const REASONING_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh'].map((effort) => ({
+  label: effort,
+  value: effort,
+}))
+const AUTO_SAVE_STATUS_RESET_MS = 1800
+const AUTO_SAVE_TOAST_MS = 2000
 
 const getDefaultModelMappingEntries = (): ModelMappingEntry[] =>
   Object.entries(DEFAULT_CLAUDE_MODEL_MAP) as ModelMappingEntry[]
 
-const parseModelMappingEntries = (value: string): ModelMappingEntry[] => {
+const parseModelMappingEntries = (value: string, fallbackEntries: ModelMappingEntry[] = []): ModelMappingEntry[] => {
   try {
     const parsed = JSON.parse(value || '{}')
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return getDefaultModelMappingEntries()
+      return fallbackEntries
     }
 
     const entries = Object.entries(parsed).map(([key, model]) => [
@@ -45,10 +59,10 @@ const parseModelMappingEntries = (value: string): ModelMappingEntry[] => {
       typeof model === 'string' ? model : String(model ?? ''),
     ]) as ModelMappingEntry[]
 
-    // 如果数据库中为空，用默认值填充
-    return entries.length > 0 ? entries : getDefaultModelMappingEntries()
+    // 如果数据库中为空，按调用方提供的默认值填充
+    return entries.length > 0 ? entries : fallbackEntries
   } catch {
-    return getDefaultModelMappingEntries()
+    return fallbackEntries
   }
 }
 
@@ -62,16 +76,114 @@ const serializeModelMappingEntries = (entries: ModelMappingEntry[]) => {
   return JSON.stringify(obj)
 }
 
+const normalizeReasoningEffortValue = (effort: string) => {
+  const value = effort.trim().toLowerCase()
+  if (value === 'max') return 'xhigh'
+  return ['low', 'medium', 'high', 'xhigh'].includes(value) ? value : 'xhigh'
+}
+
+const normalizeBillingTierPolicyValue = (value?: string | null): 'actual' | 'requested' =>
+  value === 'requested' ? 'requested' : 'actual'
+
+const normalizeFirstTokenModeValue = (value?: string | null): 'strict' | 'loose' =>
+  value === 'loose' ? 'loose' : 'strict'
+
+const getSettingsPatchValues = (settings: SystemSettings, keys: Array<keyof SystemSettings>): Partial<SystemSettings> => {
+  const patch: Record<string, unknown> = {}
+  for (const key of keys) {
+    patch[key] = settings[key]
+  }
+  return patch as Partial<SystemSettings>
+}
+
+const parseReasoningEffortModelEntries = (value: string): ReasoningEffortModelEntry[] => {
+  try {
+    const parsed = JSON.parse(value || '[]')
+    if (!Array.isArray(parsed)) return EMPTY_REASONING_EFFORT_MODEL_ENTRIES
+    return parsed
+      .map((entry) => ({
+        model: typeof entry?.model === 'string' ? entry.model : '',
+        effort: normalizeReasoningEffortValue(typeof entry?.effort === 'string' ? entry.effort : 'xhigh'),
+      }))
+      .filter((entry) => entry.model.trim())
+  } catch {
+    return EMPTY_REASONING_EFFORT_MODEL_ENTRIES
+  }
+}
+
+const serializeReasoningEffortModelEntries = (entries: ReasoningEffortModelEntry[]) => {
+  const seen = new Set<string>()
+  const normalized: ReasoningEffortModelEntry[] = []
+  for (const entry of entries) {
+    const model = entry.model.trim()
+    const effort = normalizeReasoningEffortValue(entry.effort)
+    if (!model) continue
+    const key = `${model.toLowerCase()}(${effort})`
+    if (seen.has(key)) continue
+    seen.add(key)
+    normalized.push({ model, effort })
+  }
+  return JSON.stringify(normalized)
+}
+
+const reasoningEffortAlias = (entry: ReasoningEffortModelEntry) => {
+  const model = entry.model.trim()
+  const effort = normalizeReasoningEffortValue(entry.effort)
+  return model ? `${model}(${effort})` : ''
+}
+
 // 模型映射编辑器组件
-function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+function ModelMappingEditor({
+  value,
+  onChange,
+  fallbackEntries = EMPTY_MODEL_MAPPING_ENTRIES,
+  sourceOptions,
+  targetOptions,
+  sourceLabel,
+  targetLabel,
+  sourcePlaceholder,
+  targetPlaceholder,
+}: {
+  value: string
+  onChange: (v: string) => void
+  fallbackEntries?: ModelMappingEntry[]
+  sourceOptions?: Array<{ label: string; value: string }>
+  targetOptions?: Array<{ label: string; value: string }>
+  sourceLabel: string
+  targetLabel: string
+  sourcePlaceholder: string
+  targetPlaceholder: string
+}) {
   const { t } = useTranslation()
-  const [mappings, setMappings] = useState<ModelMappingEntry[]>(() => parseModelMappingEntries(value))
+  const [mappings, setMappings] = useState<ModelMappingEntry[]>(() => parseModelMappingEntries(value, fallbackEntries))
   const lastEmittedValueRef = useRef<string | null>(null)
+  const sourceSelectOptions = useMemo(() => {
+    if (!sourceOptions) return []
+    const byValue = new Map(sourceOptions.map((option) => [option.value, option]))
+    for (const [source] of mappings) {
+      const value = source.trim()
+      if (value && !byValue.has(value)) {
+        byValue.set(value, { label: value, value })
+      }
+    }
+    return [...byValue.values()]
+  }, [mappings, sourceOptions])
+  const targetSelectOptions = useMemo(() => {
+    if (!targetOptions) return []
+    const byValue = new Map(targetOptions.map((option) => [option.value, option]))
+    for (const [, target] of mappings) {
+      const value = target.trim()
+      if (value && !byValue.has(value)) {
+        byValue.set(value, { label: value, value })
+      }
+    }
+    return [...byValue.values()]
+  }, [mappings, targetOptions])
 
   useEffect(() => {
     if (value === lastEmittedValueRef.current) return
-    setMappings(parseModelMappingEntries(value))
-  }, [value])
+    setMappings(parseModelMappingEntries(value, fallbackEntries))
+  }, [fallbackEntries, value])
 
   const updateMappings = (entries: ModelMappingEntry[]) => {
     setMappings(entries)
@@ -93,31 +205,56 @@ function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: 
   }
 
   const handleAdd = () => {
-    updateMappings([...mappings, ['', '']])
+    const defaultSource = sourceOptions && targetOptions
+      ? sourceOptions[1]?.value ?? sourceOptions[0]?.value ?? ''
+      : sourceOptions?.[0]?.value ?? ''
+    updateMappings([...mappings, [defaultSource, targetOptions?.[0]?.value ?? '']])
   }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] gap-1.5 px-1 text-xs font-semibold text-muted-foreground">
-        <span>{t('settings2.anthropicModel')}</span>
-        <span>{t('settings2.codexModel')}</span>
+        <span>{sourceLabel}</span>
+        <span>{targetLabel}</span>
         <span />
       </div>
       <div className="min-h-[180px] flex-1 space-y-1.5 overflow-y-auto pr-1">
         {mappings.map(([k, v], i) => (
           <div key={i} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-1.5">
-            <Input
-              className="h-8 px-2 font-mono text-xs"
-              placeholder="claude-opus-4-6"
-              value={k}
-              onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 0, e.target.value)}
-            />
-            <Input
-              className="h-8 px-2 font-mono text-xs"
-              placeholder="gpt-5.4"
-              value={v}
-              onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 1, e.target.value)}
-            />
+            {sourceOptions ? (
+              <Select
+                compact
+                value={k.trim()}
+                options={sourceSelectOptions}
+                placeholder={sourcePlaceholder}
+                disabled={sourceSelectOptions.length === 0}
+                onValueChange={(next) => handleChange(i, 0, next)}
+              />
+            ) : (
+              <Input
+                className="h-8 px-2 font-mono text-xs"
+                placeholder={sourcePlaceholder}
+                value={k}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 0, e.target.value)}
+              />
+            )}
+            {targetOptions ? (
+              <Select
+                compact
+                value={v.trim()}
+                options={targetSelectOptions}
+                placeholder={targetPlaceholder}
+                disabled={targetSelectOptions.length === 0}
+                onValueChange={(next) => handleChange(i, 1, next)}
+              />
+            ) : (
+              <Input
+                className="h-8 px-2 font-mono text-xs"
+                placeholder={targetPlaceholder}
+                value={v}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 1, e.target.value)}
+              />
+            )}
             <button
               type="button"
               onClick={() => handleRemove(i)}
@@ -131,6 +268,106 @@ function ModelMappingEditor({ value, onChange }: { value: string; onChange: (v: 
       </div>
       <Button type="button" variant="outline" size="sm" className="self-start" onClick={handleAdd}>
         + {t('settings2.addMapping')}
+      </Button>
+    </div>
+  )
+}
+
+function ReasoningEffortModelsEditor({
+  value,
+  onChange,
+  baseModelOptions,
+}: {
+  value: string
+  onChange: (v: string) => void
+  baseModelOptions: Array<{ label: string; value: string }>
+}) {
+  const { t } = useTranslation()
+  const [entries, setEntries] = useState<ReasoningEffortModelEntry[]>(() => parseReasoningEffortModelEntries(value))
+  const lastEmittedValueRef = useRef<string | null>(null)
+  const modelOptions = useMemo(() => {
+    const byValue = new Map(baseModelOptions.map((option) => [option.value, option]))
+    for (const entry of entries) {
+      const model = entry.model.trim()
+      if (model && !byValue.has(model)) {
+        byValue.set(model, { label: model, value: model })
+      }
+    }
+    return [...byValue.values()]
+  }, [baseModelOptions, entries])
+
+  useEffect(() => {
+    if (value === lastEmittedValueRef.current) return
+    setEntries(parseReasoningEffortModelEntries(value))
+  }, [value])
+
+  const updateEntries = (nextEntries: ReasoningEffortModelEntry[]) => {
+    setEntries(nextEntries)
+    const serialized = serializeReasoningEffortModelEntries(nextEntries)
+    lastEmittedValueRef.current = serialized
+    onChange(serialized)
+  }
+
+  const handleChange = (index: number, patch: Partial<ReasoningEffortModelEntry>) => {
+    const next = entries.map((entry, i) => (i === index ? { ...entry, ...patch } : entry))
+    updateEntries(next)
+  }
+
+  const handleRemove = (index: number) => {
+    updateEntries(entries.filter((_, i) => i !== index))
+  }
+
+  const handleAdd = () => {
+    updateEntries([...entries, { model: baseModelOptions[0]?.value ?? 'gpt-5.5', effort: 'xhigh' }])
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="overflow-x-auto pb-1">
+        <div className="w-fit min-w-[32rem]">
+          <div className="grid shrink-0 grid-cols-[minmax(0,13rem)_8rem_max-content_2rem] gap-2 px-1 text-xs font-semibold text-muted-foreground">
+            <span>{t('settings2.baseModel')}</span>
+            <span>{t('settings2.reasoningEffort')}</span>
+            <span>{t('settings2.generatedModel')}</span>
+            <span />
+          </div>
+          <div className="mt-2 max-h-[220px] space-y-1.5 overflow-y-auto pr-1">
+            {entries.map((entry, i) => (
+              <div key={i} className="grid grid-cols-[minmax(0,13rem)_8rem_max-content_2rem] items-center gap-2">
+                <Select
+                  compact
+                  value={entry.model.trim()}
+                  options={modelOptions}
+                  placeholder={t('settings2.selectBaseModel')}
+                  disabled={modelOptions.length === 0}
+                  onValueChange={(model) => handleChange(i, { model })}
+                />
+                <Select
+                  compact
+                  value={normalizeReasoningEffortValue(entry.effort)}
+                  options={REASONING_EFFORT_OPTIONS}
+                  onValueChange={(effort) => handleChange(i, { effort })}
+                />
+                <div className="flex min-w-0">
+                  <Badge variant="secondary" className="max-w-full px-2 py-1 font-mono text-[11px]">
+                    <span className="truncate">{reasoningEffortAlias(entry) || '-'}</span>
+                  </Badge>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleRemove(i)}
+                  aria-label={t('common.delete')}
+                  className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <Button type="button" variant="outline" size="sm" className="self-start" onClick={handleAdd}>
+        + {t('settings2.addReasoningModel')}
       </Button>
     </div>
   )
@@ -198,27 +435,234 @@ function StatusTile({
   children: ReactNode
 }) {
   return (
-    <div className="flex min-h-[76px] flex-col justify-between gap-2 rounded-lg border border-border bg-muted/25 p-3">
+    <div data-slot="status-tile" className="flex min-h-[76px] flex-col justify-between gap-2 rounded-lg border border-border bg-muted/25 p-3">
       <span className="text-[11px] font-bold uppercase text-muted-foreground">{label}</span>
       <div className="text-sm font-semibold text-foreground">{children}</div>
     </div>
   )
 }
 
+const SITE_LOGO_MAX_BYTES = 600 * 1024
+const SITE_LOGO_CANVAS_SIZE = 80
+const BACKGROUND_IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+const BACKGROUND_VIDEO_UPLOAD_MAX_BYTES = 40 * 1024 * 1024
+
+function formatBytesKB(bytes: number) {
+  return Math.max(1, Math.round(bytes / 1024))
+}
+
+function getSiteLogoMimeType(file: File) {
+  const type = file.type.toLowerCase()
+  const name = file.name.toLowerCase()
+  if (type === 'image/png' || name.endsWith('.png')) return 'image/png'
+  if (type === 'image/jpeg' || name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg'
+  if (type === 'image/svg+xml' || name.endsWith('.svg')) return 'image/svg+xml'
+  return ''
+}
+
+function getBackgroundImageMimeType(file: File) {
+  const type = file.type.toLowerCase()
+  const name = file.name.toLowerCase()
+  if (type === 'image/png' || name.endsWith('.png')) return 'image/png'
+  if (type === 'image/jpeg' || name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg'
+  if (type === 'image/webp' || name.endsWith('.webp')) return 'image/webp'
+  if (type === 'image/svg+xml' || name.endsWith('.svg')) return 'image/svg+xml'
+  if (type === 'video/mp4' || name.endsWith('.mp4')) return 'video/mp4'
+  return ''
+}
+
+function dataURLByteLength(dataURL: string) {
+  const commaIndex = dataURL.indexOf(',')
+  if (commaIndex === -1) return new Blob([dataURL]).size
+  const meta = dataURL.slice(0, commaIndex)
+  const data = dataURL.slice(commaIndex + 1)
+  if (meta.endsWith(';base64')) {
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0
+    return Math.floor((data.length * 3) / 4) - padding
+  }
+  return new Blob([decodeURIComponent(data)]).size
+}
+
+function readFileAsDataURL(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+function textToBase64(value: string) {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.slice(i, i + 0x8000))
+  }
+  return btoa(binary)
+}
+
+function minifySVG(value: string) {
+  return value
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/>\s+</g, '><')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+function loadImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = reject
+    image.src = src
+  })
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob)
+      else reject(new Error('canvas-to-blob-failed'))
+    }, type, quality)
+  })
+}
+
+async function blobToDataURL(blob: Blob) {
+  return readFileAsDataURL(new File([blob], 'site-logo', { type: blob.type }))
+}
+
+async function compressImageSourceToDataURL(src: string, mimeType: string) {
+  const image = await loadImage(src)
+  const canvas = document.createElement('canvas')
+  canvas.width = SITE_LOGO_CANVAS_SIZE
+  canvas.height = SITE_LOGO_CANVAS_SIZE
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('canvas-context-unavailable')
+
+  const outputType = mimeType === 'image/jpeg' ? 'image/jpeg' : 'image/png'
+  if (outputType === 'image/jpeg') {
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+  } else {
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+  }
+
+  const sourceWidth = image.naturalWidth || image.width || SITE_LOGO_CANVAS_SIZE
+  const sourceHeight = image.naturalHeight || image.height || SITE_LOGO_CANVAS_SIZE
+  const scale = Math.min(canvas.width / sourceWidth, canvas.height / sourceHeight)
+  const drawWidth = Math.max(1, Math.round(sourceWidth * scale))
+  const drawHeight = Math.max(1, Math.round(sourceHeight * scale))
+  const dx = Math.round((canvas.width - drawWidth) / 2)
+  const dy = Math.round((canvas.height - drawHeight) / 2)
+  ctx.drawImage(image, dx, dy, drawWidth, drawHeight)
+
+  if (outputType === 'image/png') {
+    const blob = await canvasToBlob(canvas, outputType)
+    return blobToDataURL(blob)
+  }
+
+  const qualities = [0.86, 0.72, 0.6, 0.48, 0.36]
+  let bestDataURL = ''
+  for (const quality of qualities) {
+    const blob = await canvasToBlob(canvas, outputType, quality)
+    const dataURL = await blobToDataURL(blob)
+    bestDataURL = dataURL
+    if (dataURLByteLength(dataURL) <= SITE_LOGO_MAX_BYTES) return dataURL
+  }
+  return bestDataURL
+}
+
+async function compressSiteLogoFile(file: File, mimeType: string) {
+  if (mimeType === 'image/svg+xml') {
+    const minified = minifySVG(await file.text())
+    const svgDataURL = `data:image/svg+xml;base64,${textToBase64(minified)}`
+    if (dataURLByteLength(svgDataURL) <= SITE_LOGO_MAX_BYTES) return svgDataURL
+    return compressImageSourceToDataURL(svgDataURL, mimeType)
+  }
+
+  const objectURL = URL.createObjectURL(file)
+  try {
+    return await compressImageSourceToDataURL(objectURL, mimeType)
+  } finally {
+    URL.revokeObjectURL(objectURL)
+  }
+}
+
 export default function Settings() {
   const { t } = useTranslation()
+  const { applyBranding } = useBranding()
+  const defaultClaudeModelMappingEntries = useMemo(() => getDefaultModelMappingEntries(), [])
   const booleanOptions = [
     { label: t('common.disabled'), value: 'false' },
     { label: t('common.enabled'), value: 'true' },
   ]
+  const schedulerModeOptions = [
+    { label: t('settings.schedulerModeRoundRobin'), value: 'round_robin' },
+    { label: t('settings.schedulerModeRemainingQuota'), value: 'remaining_quota' },
+  ]
+  const affinityModeOptions = [
+    { label: t('settings.affinityModeBounded'), value: 'bounded' },
+    { label: t('settings.affinityModeOff'), value: 'off' },
+    { label: t('settings.affinityModeStrict'), value: 'strict' },
+  ]
+  const clientCompatOptions = [
+    { label: t('settings.clientCompatPreserve'), value: 'preserve' },
+    { label: t('settings.clientCompatAuto'), value: 'auto' },
+    { label: t('settings.clientCompatForce'), value: 'force' },
+  ]
+  const usageLogModeOptions = [
+    { label: t('settings.usageLogFull'), value: 'full' },
+    { label: t('settings.usageLogErrors'), value: 'errors' },
+    { label: t('settings.usageLogOff'), value: 'off' },
+  ]
+  const billingTierPolicyOptions = [
+    { label: t('settings.billingTierPolicyActual'), value: 'actual' },
+    { label: t('settings.billingTierPolicyRequested'), value: 'requested' },
+  ]
+  const streamFlushPolicyOptions = [
+    { label: t('settings.streamFlushImmediate'), value: 'immediate' },
+    { label: t('settings.streamFlushCoalesce'), value: 'coalesce' },
+  ]
+  const firstTokenModeOptions = [
+    { label: t('settings.firstTokenModeStrict'), value: 'strict' },
+    { label: t('settings.firstTokenModeLoose'), value: 'loose' },
+  ]
+  const imageStorageBackendOptions = [
+    { label: t('settings.imageStorageLocal'), value: 'local' },
+    { label: t('settings.imageStorageS3'), value: 's3' },
+  ]
+  const normalizeLazySettingsForm = useCallback((settings: SystemSettings): SystemSettings => {
+    const normalized = {
+      ...settings,
+      billing_tier_policy: normalizeBillingTierPolicyValue(settings.billing_tier_policy),
+      first_token_mode: normalizeFirstTokenModeValue(settings.first_token_mode),
+    }
+    if (!normalized.lazy_mode) {
+      return normalized
+    }
+    return {
+      ...normalized,
+      auto_clean_full_usage: false,
+    }
+  }, [])
   const [settingsForm, setSettingsForm] = useState<SystemSettings>({
+    site_name: 'CodexProxy',
+    site_logo: '',
+    background_image: '',
+    background_opacity: 18,
+    background_blur: 0,
+    background_glass_opacity: 58,
+    background_glass_blur: 5,
     max_concurrency: 2,
     global_rpm: 0,
     test_model: '',
     test_concurrency: 50,
-    background_refresh_interval_minutes: 2,
-    usage_probe_max_age_minutes: 10,
-    recovery_probe_interval_minutes: 30,
+	    background_refresh_interval_minutes: 2,
+	    usage_probe_max_age_minutes: 10,
+	    usage_probe_concurrency: 16,
+	    usage_probe_responses_fallback_enabled: true,
+	    recovery_probe_interval_minutes: 30,
+    lazy_mode: false,
     pg_max_conns: 50,
     redis_pool_size: 30,
     auto_clean_unauthorized: false,
@@ -230,13 +674,24 @@ export default function Settings() {
     auto_clean_full_usage: false,
     proxy_pool_enabled: false,
     fast_scheduler_enabled: false,
+    codex_force_websocket: false,
+    codex_ws_keepalive_enabled: false,
+    codex_ws_keepalive_interval_sec: 60,
+    codex_ws_hide_upstream_errors: true,
+    codex_ws_silent_retry_enabled: true,
+    codex_ws_silent_max_retries: 2,
+    scheduler_mode: 'round_robin',
+    affinity_mode: 'bounded',
     max_retries: 2,
+    max_rate_limit_retries: 1,
     allow_remote_migration: false,
     database_driver: 'postgres',
     database_label: 'PostgreSQL',
     cache_driver: 'redis',
     cache_label: 'Redis',
     model_mapping: '{}',
+    codex_model_mapping: '{}',
+    reasoning_effort_models: '[]',
     resin_url: '',
     resin_platform_name: '',
     prompt_filter_enabled: false,
@@ -248,19 +703,180 @@ export default function Settings() {
     prompt_filter_sensitive_words: '',
     prompt_filter_custom_patterns: '[]',
     prompt_filter_disabled_patterns: '[]',
+    client_compat_mode: 'preserve',
+    codex_min_cli_version: '0.118.0',
+    usage_log_mode: 'full',
+    usage_log_batch_size: 200,
+    usage_log_flush_interval_seconds: 5,
+    stream_flush_policy: 'immediate',
+    stream_flush_interval_ms: 20,
+    first_token_mode: 'strict',
+    first_token_timeout_seconds: 0,
+    billing_tier_policy: 'actual',
+    show_full_usage_numbers: false,
+    image_storage_backend: 'local',
+    image_s3_endpoint: '',
+    image_s3_region: '',
+    image_s3_bucket: '',
+    image_s3_access_key: '',
+    image_s3_secret_key: '',
+    image_s3_prefix: '',
+    image_s3_force_path_style: false,
   })
+  const lazyModeActive = settingsForm.lazy_mode
   const [savingSettings, setSavingSettings] = useState(false)
+  const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatus>('idle')
+  const [autoSaveError, setAutoSaveError] = useState('')
+  const [testingImageStorage, setTestingImageStorage] = useState(false)
   const [loadedAdminSecret, setLoadedAdminSecret] = useState('')
   const [modelList, setModelList] = useState<string[]>([])
   const [modelItems, setModelItems] = useState<ModelInfo[]>([])
   const [modelsLastSyncedAt, setModelsLastSyncedAt] = useState<string | undefined>()
   const [modelsSourceURL, setModelsSourceURL] = useState('')
   const [syncingModels, setSyncingModels] = useState(false)
+  const logoFileInputRef = useRef<HTMLInputElement>(null)
+  const backgroundFileInputRef = useRef<HTMLInputElement>(null)
+  const persistedBrandingRef = useRef<Partial<SiteBranding> | null>(null)
+  const settingsFormRef = useRef(settingsForm)
+  const autoSavePendingCountRef = useRef(0)
+  const autoSaveFieldVersionsRef = useRef<Record<string, number>>({})
+  const autoSaveStatusTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null)
   const { toast, showToast } = useToast()
+
+  useEffect(() => {
+    settingsFormRef.current = settingsForm
+  }, [settingsForm])
+
+  useEffect(() => {
+    return () => {
+      if (autoSaveStatusTimerRef.current) {
+        window.clearTimeout(autoSaveStatusTimerRef.current)
+      }
+    }
+  }, [])
+
+  const commitSettingsForm = useCallback(
+    (next: SystemSettings) => {
+      const normalized = normalizeLazySettingsForm(next)
+      settingsFormRef.current = normalized
+      setSettingsForm(normalized)
+      return normalized
+    },
+    [normalizeLazySettingsForm],
+  )
+
+  const scheduleAutoSaveStatusReset = useCallback(() => {
+    if (autoSaveStatusTimerRef.current) {
+      window.clearTimeout(autoSaveStatusTimerRef.current)
+    }
+    autoSaveStatusTimerRef.current = window.setTimeout(() => {
+      setAutoSaveStatus((status) => (status === 'saved' ? 'idle' : status))
+      autoSaveStatusTimerRef.current = null
+    }, AUTO_SAVE_STATUS_RESET_MS)
+  }, [])
+
+  const finishAutoSaveRequest = useCallback((status: Exclude<AutoSaveStatus, 'idle' | 'saving'>) => {
+    autoSavePendingCountRef.current = Math.max(0, autoSavePendingCountRef.current - 1)
+    if (autoSavePendingCountRef.current > 0) {
+      setAutoSaveStatus('saving')
+      return
+    }
+    setAutoSaveStatus(status)
+    if (status === 'saved') {
+      scheduleAutoSaveStatusReset()
+    }
+  }, [scheduleAutoSaveStatusReset])
+
+  const autoSaveSettingsPatch = useCallback(async (patch: Partial<SystemSettings>) => {
+    const patchKeys = Object.keys(patch) as Array<keyof SystemSettings>
+    if (patchKeys.length === 0) return
+
+    const previous = settingsFormRef.current
+    const optimistic = commitSettingsForm({
+      ...previous,
+      ...patch,
+    })
+    const rollbackPatch = getSettingsPatchValues(previous, patchKeys)
+    const requestedVersions: Record<string, number> = {}
+
+    for (const key of patchKeys) {
+      const fieldKey = String(key)
+      const nextVersion = (autoSaveFieldVersionsRef.current[fieldKey] ?? 0) + 1
+      autoSaveFieldVersionsRef.current[fieldKey] = nextVersion
+      requestedVersions[fieldKey] = nextVersion
+    }
+
+    autoSavePendingCountRef.current += 1
+    if (autoSaveStatusTimerRef.current) {
+      window.clearTimeout(autoSaveStatusTimerRef.current)
+      autoSaveStatusTimerRef.current = null
+    }
+    setAutoSaveError('')
+    setAutoSaveStatus('saving')
+
+    try {
+      const updated = await api.updateSettings(getSettingsPatchValues(optimistic, patchKeys))
+      const mergeKeys = patchKeys.filter((key) => {
+        const fieldKey = String(key)
+        return autoSaveFieldVersionsRef.current[fieldKey] === requestedVersions[fieldKey]
+      })
+      if (mergeKeys.length > 0) {
+        commitSettingsForm({
+          ...settingsFormRef.current,
+          ...getSettingsPatchValues(updated, mergeKeys),
+        })
+      }
+      const autoSaveSuccessMessage = updated.expired_cleaned && updated.expired_cleaned > 0
+        ? `${t('settings.autoSaved')} · ${t('settings.expiredCleanedResult', { count: updated.expired_cleaned })}`
+        : t('settings.autoSaved')
+      showToast(autoSaveSuccessMessage, 'success', AUTO_SAVE_TOAST_MS)
+      finishAutoSaveRequest('saved')
+    } catch (error) {
+      const rollbackKeys = patchKeys.filter((key) => {
+        const fieldKey = String(key)
+        return autoSaveFieldVersionsRef.current[fieldKey] === requestedVersions[fieldKey]
+      })
+      if (rollbackKeys.length > 0) {
+        commitSettingsForm({
+          ...settingsFormRef.current,
+          ...getSettingsPatchValues({ ...previous, ...rollbackPatch }, rollbackKeys),
+        })
+      }
+      const message = getErrorMessage(error)
+      setAutoSaveError(message)
+      showToast(`${t('settings.autoSaveFailed')}: ${message}`, 'error')
+      finishAutoSaveRequest('error')
+    }
+  }, [commitSettingsForm, finishAutoSaveRequest, showToast, t])
+
+  const autoSaveBooleanField = useCallback((field: keyof SystemSettings, value: string, extraPatch: Partial<SystemSettings> = {}) => {
+    void autoSaveSettingsPatch({
+      ...extraPatch,
+      [field]: value === 'true',
+    } as Partial<SystemSettings>)
+  }, [autoSaveSettingsPatch])
+
+  const autoSaveStringField = useCallback((field: keyof SystemSettings, value: string, extraPatch: Partial<SystemSettings> = {}) => {
+    void autoSaveSettingsPatch({
+      ...extraPatch,
+      [field]: value,
+    } as Partial<SystemSettings>)
+  }, [autoSaveSettingsPatch])
 
   const loadSettingsData = useCallback(async () => {
     const [health, settings, modelsResp] = await Promise.all([api.getHealth(), api.getSettings(), api.getModels()])
-    setSettingsForm(settings)
+    commitSettingsForm(settings)
+    const branding = {
+      site_name: settings.site_name,
+      site_logo: settings.site_logo,
+      background_image: settings.background_image,
+      background_opacity: settings.background_opacity,
+      background_blur: settings.background_blur,
+      background_glass_opacity: settings.background_glass_opacity,
+      background_glass_blur: settings.background_glass_blur,
+    }
+    persistedBrandingRef.current = branding
+    applyBranding(branding)
     setLoadedAdminSecret(settings.admin_secret ?? '')
     setModelList(modelsResp.models ?? [])
     setModelItems(modelsResp.items ?? [])
@@ -269,7 +885,7 @@ export default function Settings() {
     return {
       health,
     }
-  }, [])
+  }, [applyBranding, commitSettingsForm])
 
   const { data, loading, error, reload } = useDataLoader<{
     health: HealthResponse | null
@@ -284,8 +900,19 @@ export default function Settings() {
     setSavingSettings(true)
     try {
       const adminSecretChanged = settingsForm.admin_auth_source !== 'env' && settingsForm.admin_secret !== loadedAdminSecret
-      const updated = await api.updateSettings(settingsForm)
-      setSettingsForm(updated)
+      const updated = await api.updateSettings(normalizeLazySettingsForm(settingsForm))
+      commitSettingsForm(updated)
+      const branding = {
+        site_name: updated.site_name,
+        site_logo: updated.site_logo,
+        background_image: updated.background_image,
+        background_opacity: updated.background_opacity,
+        background_blur: updated.background_blur,
+        background_glass_opacity: updated.background_glass_opacity,
+        background_glass_blur: updated.background_glass_blur,
+      }
+      persistedBrandingRef.current = branding
+      applyBranding(branding)
       setLoadedAdminSecret(updated.admin_secret ?? '')
       if (updated.admin_auth_source !== 'env') {
         setAdminKey(updated.admin_secret ?? '')
@@ -303,6 +930,111 @@ export default function Settings() {
       showToast(`${t('settings.saveFailed')}: ${getErrorMessage(error)}`, 'error')
     } finally {
       setSavingSettings(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!persistedBrandingRef.current) return
+    applyBranding({
+      site_name: settingsForm.site_name,
+      site_logo: settingsForm.site_logo,
+      background_image: settingsForm.background_image,
+      background_opacity: settingsForm.background_opacity,
+      background_blur: settingsForm.background_blur,
+      background_glass_opacity: settingsForm.background_glass_opacity,
+      background_glass_blur: settingsForm.background_glass_blur,
+    })
+  }, [
+    applyBranding,
+    settingsForm.site_name,
+    settingsForm.site_logo,
+    settingsForm.background_image,
+    settingsForm.background_opacity,
+    settingsForm.background_blur,
+    settingsForm.background_glass_opacity,
+    settingsForm.background_glass_blur,
+  ])
+
+  useEffect(() => {
+    return () => {
+      if (persistedBrandingRef.current) {
+        applyBranding(persistedBrandingRef.current)
+      }
+    }
+  }, [applyBranding])
+
+  const handleSiteLogoUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    const mimeType = getSiteLogoMimeType(file)
+    if (!mimeType) {
+      showToast(t('settings.siteLogoInvalidType'), 'error')
+      return
+    }
+
+    try {
+      const result = file.size <= SITE_LOGO_MAX_BYTES
+        ? await readFileAsDataURL(file)
+        : await compressSiteLogoFile(file, mimeType)
+      if (dataURLByteLength(result) > SITE_LOGO_MAX_BYTES) {
+        showToast(t('settings.siteLogoTooLarge'), 'error')
+        return
+      }
+      setSettingsForm((f) => ({ ...f, site_logo: result }))
+      if (file.size > SITE_LOGO_MAX_BYTES) {
+        showToast(t('settings.siteLogoCompressed', { size: formatBytesKB(dataURLByteLength(result)) }))
+      }
+    } catch {
+      showToast(t('settings.siteLogoCompressionFailed'), 'error')
+    }
+  }
+
+  const handleBackgroundImageUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    const mimeType = getBackgroundImageMimeType(file)
+    if (!mimeType) {
+      showToast(t('settings.backgroundImageInvalidType'), 'error')
+      return
+    }
+    const maxBytes = mimeType === 'video/mp4' ? BACKGROUND_VIDEO_UPLOAD_MAX_BYTES : BACKGROUND_IMAGE_UPLOAD_MAX_BYTES
+    if (file.size > maxBytes) {
+      showToast(t(mimeType === 'video/mp4' ? 'settings.backgroundVideoTooLarge' : 'settings.backgroundImageTooLarge'), 'error')
+      return
+    }
+
+    try {
+      const uploaded = await api.uploadBackground(file)
+      setSettingsForm((f) => ({
+        ...f,
+        background_image: uploaded.url,
+        background_opacity: f.background_opacity || 18,
+      }))
+      showToast(t('settings.backgroundImageUploaded'))
+    } catch (err) {
+      showToast(getErrorMessage(err) || t('settings.backgroundImageUploadFailed'), 'error')
+    }
+  }
+
+  const handleTestImageStorage = async () => {
+    setTestingImageStorage(true)
+    try {
+      const result = await api.testImageStorageConnection({
+        endpoint: settingsForm.image_s3_endpoint,
+        region: settingsForm.image_s3_region,
+        bucket: settingsForm.image_s3_bucket,
+        access_key: settingsForm.image_s3_access_key,
+        secret_key: settingsForm.image_s3_secret_key,
+        prefix: settingsForm.image_s3_prefix,
+        force_path_style: settingsForm.image_s3_force_path_style,
+      })
+      showToast(t('settings.imageS3TestSuccess', { bucket: result.bucket }))
+    } catch (error) {
+      showToast(`${t('settings.imageS3TestFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setTestingImageStorage(false)
     }
   }
 
@@ -332,6 +1064,34 @@ export default function Settings() {
   const showConnectionPool = isExternalDatabase || isExternalCache
   const canConfigureRemoteMigration = settingsForm.admin_auth_source === 'env' || settingsForm.admin_secret.trim() !== ''
   const saveButtonLabel = savingSettings ? t('common.saving') : t('settings.saveSettings')
+  const autoSaveStatusMeta = autoSaveStatus === 'idle' ? null : (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 font-medium',
+        autoSaveStatus === 'saving' && 'text-muted-foreground',
+        autoSaveStatus === 'saved' && 'text-emerald-600 dark:text-emerald-400',
+        autoSaveStatus === 'error' && 'text-destructive',
+      )}
+      title={autoSaveStatus === 'error' ? autoSaveError : undefined}
+    >
+      <span
+        className={cn(
+          'size-1.5 rounded-full',
+          autoSaveStatus === 'saving' && 'animate-pulse bg-muted-foreground',
+          autoSaveStatus === 'saved' && 'bg-emerald-500',
+          autoSaveStatus === 'error' && 'bg-destructive',
+        )}
+      />
+      {autoSaveStatus === 'saving'
+        ? t('settings.autoSaving')
+        : autoSaveStatus === 'saved'
+          ? t('settings.autoSaved')
+          : t('settings.autoSaveFailed')}
+    </span>
+  )
+  const siteLogoPreview = sanitizeBrandingLogo(settingsForm.site_logo) || DEFAULT_SITE_LOGO
+  const backgroundImagePreview = sanitizeBrandingImage(settingsForm.background_image)
+  const backgroundIsVideo = isBrandingVideo(backgroundImagePreview)
   const visibleModelItems = useMemo(() => {
     if (modelItems.length > 0) {
       return modelItems
@@ -345,14 +1105,27 @@ export default function Settings() {
       api_key_auth_available: id !== 'gpt-5.5',
     }))
   }, [modelItems, modelList])
+  const codexModelOptions = visibleModelItems
+    .filter((model) =>
+      model.enabled &&
+      !model.id.includes('(') &&
+      !model.id.includes(')')
+    )
+    .map((model) => ({ label: model.id, value: model.id }))
   const textModelOptions = visibleModelItems
-    .filter((model) => model.enabled && model.category !== 'image' && !model.id.includes('image'))
+    .filter((model) =>
+      model.enabled &&
+      model.category !== 'image' &&
+      !model.id.includes('image') &&
+      !model.id.includes('(') &&
+      !model.id.includes(')')
+    )
     .map((model) => ({ label: model.id, value: model.id }))
   const enabledModelCount = visibleModelItems.filter((model) => model.enabled).length
   const modelsLastSyncedLabel = modelsLastSyncedAt ? formatBeijingTime(modelsLastSyncedAt) : t('settings.modelsNeverSynced')
   const modelsSourceLabel = modelsSourceURL || 'https://developers.openai.com/codex/models'
   const renderSaveButton = (className?: string) => (
-    <Button className={className} onClick={() => void handleSaveSettings()} disabled={savingSettings}>
+    <Button className={className} onClick={() => void handleSaveSettings()} disabled={savingSettings || autoSaveStatus === 'saving'}>
       <Save className="size-4" />
       {saveButtonLabel}
     </Button>
@@ -372,6 +1145,7 @@ export default function Settings() {
         <PageHeader
           title={t('settings.title')}
           description={t('settings.description')}
+          actionMeta={autoSaveStatusMeta}
           actions={renderSaveButton('max-sm:w-full')}
         />
 
@@ -402,9 +1176,9 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,1.05fr)]">
+          <div className="grid gap-4 xl:grid-cols-3">
             <SettingsCard title={t('settings.trafficProtection')}>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(210px,1fr))] gap-4">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
                 <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')}>
                   <Input
                     type="number"
@@ -431,27 +1205,20 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_retries: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
+                <SettingField label={t('settings.maxRateLimitRetries')} description={t('settings.maxRateLimitRetriesRange')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={10}
+                    value={settingsForm.max_rate_limit_retries}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_rate_limit_retries: parseInt(e.target.value) || 0 }))}
+                  />
+                </SettingField>
               </div>
             </SettingsCard>
 
-            <SettingsCard title={t('settings.scheduler')}>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4">
-                <SettingField label={t('settings.testModelLabel')} description={t('settings.testModelHint')}>
-	                  <Select
-	                    value={settingsForm.test_model}
-	                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, test_model: value }))}
-	                    options={textModelOptions}
-	                  />
-                </SettingField>
-                <SettingField label={t('settings.testConcurrency')} description={t('settings.testConcurrencyRange')}>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={200}
-                    value={settingsForm.test_concurrency}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, test_concurrency: parseInt(e.target.value) || 1 }))}
-                  />
-                </SettingField>
+            <SettingsCard title={t('settings.probeScheduling')}>
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
                 <SettingField label={t('settings.backgroundRefreshInterval')} description={t('settings.backgroundRefreshIntervalDesc')}>
                   <Input
                     type="number"
@@ -470,60 +1237,337 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_max_age_minutes: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')}>
+                <SettingField label={t('settings.usageProbeConcurrency')} description={t('settings.usageProbeConcurrencyDesc')}>
                   <Input
                     type="number"
                     min={1}
+                    max={128}
+                    value={settingsForm.usage_probe_concurrency}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_concurrency: parseInt(e.target.value) || 1 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.usageProbeResponsesFallback')} description={t('settings.usageProbeResponsesFallbackDesc')}>
+                  <Select
+                    value={settingsForm.usage_probe_responses_fallback_enabled ? 'true' : 'false'}
+                    onValueChange={(value) => autoSaveBooleanField('usage_probe_responses_fallback_enabled', value)}
+                    options={booleanOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')}>
+                  <Input
+                    type={lazyModeActive ? 'text' : 'number'}
+                    min={1}
                     max={10080}
-                    value={settingsForm.recovery_probe_interval_minutes}
+                    value={lazyModeActive ? '∞' : settingsForm.recovery_probe_interval_minutes}
+                    disabled={lazyModeActive}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, recovery_probe_interval_minutes: parseInt(e.target.value) || 1 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.lazyMode')} description={t('settings.lazyModeDesc')}>
+                  <Select
+                    value={settingsForm.lazy_mode ? 'true' : 'false'}
+                    onValueChange={(value) => {
+                      const enabled = value === 'true'
+                      void autoSaveSettingsPatch({
+                        lazy_mode: enabled,
+                        auto_clean_full_usage: enabled ? false : settingsFormRef.current.auto_clean_full_usage,
+                      })
+                    }}
+                    options={booleanOptions}
+                  />
+                </SettingField>
+              </div>
+            </SettingsCard>
+
+            <SettingsCard title={t('settings.schedulingStrategy')}>
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
+                <SettingField label={t('settings.testModelLabel')} description={t('settings.testModelHint')}>
+                  <Select
+                    value={settingsForm.test_model}
+                    onValueChange={(value) => autoSaveStringField('test_model', value)}
+                    options={textModelOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.testConcurrency')} description={t('settings.testConcurrencyRange')}>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={settingsForm.test_concurrency}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, test_concurrency: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.fastSchedulerEnabled')} description={t('settings.fastSchedulerEnabledDesc')}>
                   <Select
                     value={settingsForm.fast_scheduler_enabled ? 'true' : 'false'}
-                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, fast_scheduler_enabled: value === 'true' }))}
+                    onValueChange={(value) => autoSaveBooleanField('fast_scheduler_enabled', value)}
                     options={booleanOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.schedulerMode')} description={t('settings.schedulerModeDesc')}>
+                  <Select
+                    value={settingsForm.scheduler_mode}
+                    onValueChange={(value) => autoSaveStringField('scheduler_mode', value)}
+                    options={schedulerModeOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.affinityMode')} description={t('settings.affinityModeDesc')}>
+                  <Select
+                    value={settingsForm.affinity_mode || 'bounded'}
+                    onValueChange={(value) => autoSaveStringField('affinity_mode', value)}
+                    options={affinityModeOptions}
                   />
                 </SettingField>
               </div>
             </SettingsCard>
           </div>
 
+          <SettingsCard title={t('settings.codexWebsocket')} description={t('settings.codexWebsocketDesc')}>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
+              <SettingField label={t('settings.codexForceWebsocket')} description={t('settings.codexForceWebsocketDesc')}>
+                <Select
+                  value={settingsForm.codex_force_websocket ? 'true' : 'false'}
+                  onValueChange={(value) => autoSaveBooleanField('codex_force_websocket', value)}
+                  options={booleanOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.codexWSKeepaliveEnabled')} description={t('settings.codexWSKeepaliveEnabledDesc')}>
+                <Select
+                  value={settingsForm.codex_ws_keepalive_enabled ? 'true' : 'false'}
+                  onValueChange={(value) => autoSaveBooleanField('codex_ws_keepalive_enabled', value)}
+                  options={booleanOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.codexWSKeepaliveInterval')} description={t('settings.codexWSKeepaliveIntervalDesc')}>
+                <Input
+                  type="number"
+                  min={10}
+                  max={600}
+                  value={settingsForm.codex_ws_keepalive_interval_sec}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_keepalive_interval_sec: parseInt(e.target.value) || 60 }))}
+                />
+              </SettingField>
+              <SettingField label={t('settings.codexWSHideUpstreamErrors')} description={t('settings.codexWSHideUpstreamErrorsDesc')}>
+                <Select
+                  value={settingsForm.codex_ws_hide_upstream_errors ? 'true' : 'false'}
+                  onValueChange={(value) => autoSaveBooleanField('codex_ws_hide_upstream_errors', value)}
+                  options={booleanOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.codexWSSilentRetryEnabled')} description={t('settings.codexWSSilentRetryEnabledDesc')}>
+                <Select
+                  value={settingsForm.codex_ws_silent_retry_enabled ? 'true' : 'false'}
+                  onValueChange={(value) => autoSaveBooleanField('codex_ws_silent_retry_enabled', value)}
+                  options={booleanOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.codexWSSilentMaxRetries')} description={t('settings.codexWSSilentMaxRetriesDesc')}>
+                <Input
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={settingsForm.codex_ws_silent_max_retries}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_silent_max_retries: parseInt(e.target.value) || 0 }))}
+                />
+              </SettingField>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.runtimeOptimization')} description={t('settings.runtimeOptimizationDesc')}>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
+              <SettingField label={t('settings.clientCompatMode')} description={t('settings.clientCompatModeDesc')}>
+                <Select
+                  value={settingsForm.client_compat_mode}
+                  onValueChange={(value) => autoSaveStringField('client_compat_mode', value)}
+                  options={clientCompatOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.codexMinCliVersion')} description={t('settings.codexMinCliVersionDesc')}>
+                <Input
+                  value={settingsForm.codex_min_cli_version}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
+                />
+              </SettingField>
+              <SettingField label={t('settings.usageLogMode')} description={t('settings.usageLogModeDesc')}>
+                <Select
+                  value={settingsForm.usage_log_mode}
+                  onValueChange={(value) => autoSaveStringField('usage_log_mode', value)}
+                  options={usageLogModeOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.usageLogBatchSize')} description={t('settings.usageLogBatchSizeDesc')}>
+                <Input
+                  type="number"
+                  min={1}
+                  max={10000}
+                  value={settingsForm.usage_log_batch_size}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_batch_size: parseInt(e.target.value) || 200 }))}
+                />
+              </SettingField>
+              <SettingField label={t('settings.usageLogFlushInterval')} description={t('settings.usageLogFlushIntervalDesc')}>
+                <Input
+                  type="number"
+                  min={1}
+                  max={300}
+                  value={settingsForm.usage_log_flush_interval_seconds}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_flush_interval_seconds: parseInt(e.target.value) || 5 }))}
+                />
+              </SettingField>
+              <SettingField label={t('settings.billingTierPolicy')} description={t('settings.billingTierPolicyDesc')}>
+                <Select
+                  value={settingsForm.billing_tier_policy}
+                  onValueChange={(value) => autoSaveStringField('billing_tier_policy', value)}
+                  options={billingTierPolicyOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.streamFlushPolicy')} description={t('settings.streamFlushPolicyDesc')}>
+                <Select
+                  value={settingsForm.stream_flush_policy}
+                  onValueChange={(value) => autoSaveStringField('stream_flush_policy', value)}
+                  options={streamFlushPolicyOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.streamFlushInterval')} description={t('settings.streamFlushIntervalDesc')}>
+                <Input
+                  type="number"
+                  min={1}
+                  max={1000}
+                  value={settingsForm.stream_flush_interval_ms}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, stream_flush_interval_ms: parseInt(e.target.value) || 20 }))}
+                />
+              </SettingField>
+              <SettingField label={t('settings.firstTokenMode')} description={t('settings.firstTokenModeDesc')}>
+                <Select
+                  value={settingsForm.first_token_mode}
+                  onValueChange={(value) => autoSaveStringField('first_token_mode', value)}
+                  options={firstTokenModeOptions}
+                />
+              </SettingField>
+              <SettingField label={t('settings.firstTokenTimeout')} description={t('settings.firstTokenTimeoutDesc')}>
+                <Input
+                  type="number"
+                  min={0}
+                  max={600}
+                  value={settingsForm.first_token_timeout_seconds}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, first_token_timeout_seconds: parseInt(e.target.value) || 0 }))}
+                />
+              </SettingField>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.imageStorage')} description={t('settings.imageStorageDesc')}>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
+              <SettingField label={t('settings.imageStorageBackend')} description={t('settings.imageStorageBackendDesc')}>
+                <Select
+                  value={settingsForm.image_storage_backend}
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, image_storage_backend: value }))}
+                  options={imageStorageBackendOptions}
+                />
+              </SettingField>
+              {settingsForm.image_storage_backend === 's3' ? (
+                <>
+                  <SettingField label={t('settings.imageS3Endpoint')} description={t('settings.imageS3EndpointDesc')}>
+                    <Input
+                      value={settingsForm.image_s3_endpoint}
+                      placeholder="https://..."
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, image_s3_endpoint: e.target.value }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.imageS3Region')} description={t('settings.imageS3RegionDesc')}>
+                    <Input
+                      value={settingsForm.image_s3_region}
+                      placeholder="auto"
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, image_s3_region: e.target.value }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.imageS3Bucket')} description={t('settings.imageS3BucketDesc')}>
+                    <Input
+                      value={settingsForm.image_s3_bucket}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, image_s3_bucket: e.target.value }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.imageS3AccessKey')} description={t('settings.imageS3AccessKeyDesc')}>
+                    <Input
+                      value={settingsForm.image_s3_access_key}
+                      autoComplete="off"
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, image_s3_access_key: e.target.value }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.imageS3SecretKey')} description={t('settings.imageS3SecretKeyDesc')}>
+                    <Input
+                      type="password"
+                      value={settingsForm.image_s3_secret_key}
+                      autoComplete="new-password"
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, image_s3_secret_key: e.target.value }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.imageS3Prefix')} description={t('settings.imageS3PrefixDesc')}>
+                    <Input
+                      value={settingsForm.image_s3_prefix}
+                      placeholder="codex/images"
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, image_s3_prefix: e.target.value }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.imageS3ForcePathStyle')} description={t('settings.imageS3ForcePathStyleDesc')}>
+                    <Select
+                      value={settingsForm.image_s3_force_path_style ? 'true' : 'false'}
+                      onValueChange={(value) => autoSaveBooleanField('image_s3_force_path_style', value)}
+                      options={booleanOptions}
+                    />
+                  </SettingField>
+                </>
+              ) : null}
+            </div>
+            {settingsForm.image_storage_backend === 's3' ? (
+              <div className="mt-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleTestImageStorage()}
+                  disabled={testingImageStorage || !settingsForm.image_s3_bucket || !settingsForm.image_s3_access_key || !settingsForm.image_s3_secret_key}
+                >
+                  {testingImageStorage ? t('settings.imageS3Testing') : t('settings.imageS3Test')}
+                </Button>
+              </div>
+            ) : null}
+          </SettingsCard>
+
           <SettingsCard title={t('settings.autoCleanup')}>
             <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
               <SettingField label={t('settings.autoCleanUnauthorized')} description={t('settings.autoCleanUnauthorizedDesc')}>
                 <Select
                   value={settingsForm.auto_clean_unauthorized ? 'true' : 'false'}
-                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, auto_clean_unauthorized: value === 'true' }))}
+                  onValueChange={(value) => autoSaveBooleanField('auto_clean_unauthorized', value)}
                   options={booleanOptions}
                 />
               </SettingField>
               <SettingField label={t('settings.autoCleanRateLimited')} description={t('settings.autoCleanRateLimitedDesc')}>
                 <Select
                   value={settingsForm.auto_clean_rate_limited ? 'true' : 'false'}
-                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, auto_clean_rate_limited: value === 'true' }))}
+                  onValueChange={(value) => autoSaveBooleanField('auto_clean_rate_limited', value)}
                   options={booleanOptions}
                 />
               </SettingField>
               <SettingField label={t('settings.autoCleanFullUsage')} description={t('settings.autoCleanFullUsageDesc')}>
                 <Select
-                  value={settingsForm.auto_clean_full_usage ? 'true' : 'false'}
-                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, auto_clean_full_usage: value === 'true' }))}
+                  value={lazyModeActive ? 'false' : settingsForm.auto_clean_full_usage ? 'true' : 'false'}
+                  onValueChange={(value) => autoSaveBooleanField('auto_clean_full_usage', value)}
+                  disabled={lazyModeActive}
                   options={booleanOptions}
                 />
               </SettingField>
               <SettingField label={t('settings.autoCleanError')} description={t('settings.autoCleanErrorDesc')}>
                 <Select
                   value={settingsForm.auto_clean_error ? 'true' : 'false'}
-                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, auto_clean_error: value === 'true' }))}
+                  onValueChange={(value) => autoSaveBooleanField('auto_clean_error', value)}
                   options={booleanOptions}
                 />
               </SettingField>
               <SettingField label={t('settings.autoCleanExpired')} description={t('settings.autoCleanExpiredDesc')}>
                 <Select
                   value={settingsForm.auto_clean_expired ? 'true' : 'false'}
-                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, auto_clean_expired: value === 'true' }))}
+                  onValueChange={(value) => autoSaveBooleanField('auto_clean_expired', value)}
                   options={booleanOptions}
                 />
               </SettingField>
@@ -561,21 +1605,21 @@ export default function Settings() {
                   <Select
                     value={settingsForm.allow_remote_migration ? 'true' : 'false'}
                     disabled={!canConfigureRemoteMigration}
-                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, allow_remote_migration: value === 'true' }))}
+                    onValueChange={(value) => autoSaveBooleanField('allow_remote_migration', value)}
                     options={booleanOptions}
                   />
                 </SettingField>
                 <SettingField label={t('settings.promptFilterEnabled')} description={t('settings.promptFilterEnabledDesc')}>
                   <Select
                     value={settingsForm.prompt_filter_enabled ? 'true' : 'false'}
-                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, prompt_filter_enabled: value === 'true' }))}
+                    onValueChange={(value) => autoSaveBooleanField('prompt_filter_enabled', value)}
                     options={booleanOptions}
                   />
                 </SettingField>
                 <SettingField label={t('settings.promptFilterMode')} description={t('settings.promptFilterModeDesc')}>
                   <Select
                     value={settingsForm.prompt_filter_mode}
-                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, prompt_filter_mode: value }))}
+                    onValueChange={(value) => autoSaveStringField('prompt_filter_mode', value)}
                     options={[
                       { label: t('promptFilter.modeMonitor'), value: 'monitor' },
                       { label: t('promptFilter.modeWarn'), value: 'warn' },
@@ -587,42 +1631,211 @@ export default function Settings() {
             </SettingsCard>
 
             <SettingsCard title={t('settings.display')}>
-              <SettingField label={t('settings.timezone')} description={t('settings.timezoneDesc')}>
-                <Select
-                  value={getTimezone()}
-                  onValueChange={(value) => {
-                    setTimezone(value)
-                    window.location.reload()
-                  }}
-                  options={[
-                    { label: t('settings.timezoneAuto'), value: Intl.DateTimeFormat().resolvedOptions().timeZone },
-                    { label: '(UTC) UTC', value: 'UTC' },
-                    { label: '(GMT+08:00) Asia/Shanghai', value: 'Asia/Shanghai' },
-                    { label: '(GMT+09:00) Asia/Tokyo', value: 'Asia/Tokyo' },
-                    { label: '(GMT+09:00) Asia/Seoul', value: 'Asia/Seoul' },
-                    { label: '(GMT+08:00) Asia/Singapore', value: 'Asia/Singapore' },
-                    { label: '(GMT+08:00) Asia/Hong_Kong', value: 'Asia/Hong_Kong' },
-                    { label: '(GMT+08:00) Asia/Taipei', value: 'Asia/Taipei' },
-                    { label: '(GMT+07:00) Asia/Bangkok', value: 'Asia/Bangkok' },
-                    { label: '(GMT+04:00) Asia/Dubai', value: 'Asia/Dubai' },
-                    { label: '(GMT+05:30) Asia/Kolkata', value: 'Asia/Kolkata' },
-                    { label: '(GMT+01:00) Europe/London', value: 'Europe/London' },
-                    { label: '(GMT+02:00) Europe/Paris', value: 'Europe/Paris' },
-                    { label: '(GMT+02:00) Europe/Berlin', value: 'Europe/Berlin' },
-                    { label: '(GMT+03:00) Europe/Moscow', value: 'Europe/Moscow' },
-                    { label: '(GMT+02:00) Europe/Amsterdam', value: 'Europe/Amsterdam' },
-                    { label: '(GMT+02:00) Europe/Rome', value: 'Europe/Rome' },
-                    { label: '(GMT-04:00) America/New_York', value: 'America/New_York' },
-                    { label: '(GMT-07:00) America/Los_Angeles', value: 'America/Los_Angeles' },
-                    { label: '(GMT-05:00) America/Chicago', value: 'America/Chicago' },
-                    { label: '(GMT-03:00) America/Sao_Paulo', value: 'America/Sao_Paulo' },
-                    { label: '(GMT+10:00) Australia/Sydney', value: 'Australia/Sydney' },
-                    { label: '(GMT+12:00) Pacific/Auckland', value: 'Pacific/Auckland' },
-                  ]}
-                />
-              </SettingField>
+              <div className="space-y-4">
+                <SettingField label={t('settings.siteName')} description={t('settings.siteNameDesc')}>
+                  <Input
+                    value={settingsForm.site_name}
+                    maxLength={80}
+                    placeholder="CodexProxy"
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, site_name: e.target.value }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.siteLogo')} description={t('settings.siteLogoDesc')}>
+                  <div className="flex items-start gap-3">
+                    <div className="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border bg-background shadow-sm">
+                      <img src={siteLogoPreview} alt={settingsForm.site_name || 'CodexProxy'} className="size-full object-cover" />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <Input
+                        value={settingsForm.site_logo}
+                        placeholder="/favicon.png or https://..."
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, site_logo: e.target.value }))}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <Button type="button" variant="outline" size="sm" onClick={() => logoFileInputRef.current?.click()}>
+                          <Upload className="size-4" />
+                          {t('settings.siteLogoUpload')}
+                        </Button>
+                        <Button type="button" variant="ghost" size="sm" onClick={() => setSettingsForm(f => ({ ...f, site_logo: '' }))}>
+                          <X className="size-4" />
+                          {t('settings.siteLogoReset')}
+                        </Button>
+                      </div>
+                      <input
+                        ref={logoFileInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/svg+xml,.png,.jpg,.jpeg,.svg"
+                        className="hidden"
+                        onChange={handleSiteLogoUpload}
+                      />
+                    </div>
+                  </div>
+                </SettingField>
+                <SettingField label={t('settings.timezone')} description={t('settings.timezoneDesc')}>
+                  <Select
+                    value={getTimezone()}
+                    onValueChange={(value) => {
+                      setTimezone(value)
+                      window.location.reload()
+                    }}
+                    options={[
+                      { label: t('settings.timezoneAuto'), value: Intl.DateTimeFormat().resolvedOptions().timeZone },
+                      { label: '(UTC) UTC', value: 'UTC' },
+                      { label: '(GMT+08:00) Asia/Shanghai', value: 'Asia/Shanghai' },
+                      { label: '(GMT+09:00) Asia/Tokyo', value: 'Asia/Tokyo' },
+                      { label: '(GMT+09:00) Asia/Seoul', value: 'Asia/Seoul' },
+                      { label: '(GMT+08:00) Asia/Singapore', value: 'Asia/Singapore' },
+                      { label: '(GMT+08:00) Asia/Hong_Kong', value: 'Asia/Hong_Kong' },
+                      { label: '(GMT+08:00) Asia/Taipei', value: 'Asia/Taipei' },
+                      { label: '(GMT+07:00) Asia/Bangkok', value: 'Asia/Bangkok' },
+                      { label: '(GMT+04:00) Asia/Dubai', value: 'Asia/Dubai' },
+                      { label: '(GMT+05:30) Asia/Kolkata', value: 'Asia/Kolkata' },
+                      { label: '(GMT+01:00) Europe/London', value: 'Europe/London' },
+                      { label: '(GMT+02:00) Europe/Paris', value: 'Europe/Paris' },
+                      { label: '(GMT+02:00) Europe/Berlin', value: 'Europe/Berlin' },
+                      { label: '(GMT+03:00) Europe/Moscow', value: 'Europe/Moscow' },
+                      { label: '(GMT+02:00) Europe/Amsterdam', value: 'Europe/Amsterdam' },
+                      { label: '(GMT+02:00) Europe/Rome', value: 'Europe/Rome' },
+                      { label: '(GMT-04:00) America/New_York', value: 'America/New_York' },
+                      { label: '(GMT-07:00) America/Los_Angeles', value: 'America/Los_Angeles' },
+                      { label: '(GMT-05:00) America/Chicago', value: 'America/Chicago' },
+                      { label: '(GMT-03:00) America/Sao_Paulo', value: 'America/Sao_Paulo' },
+                      { label: '(GMT+10:00) Australia/Sydney', value: 'Australia/Sydney' },
+                      { label: '(GMT+12:00) Pacific/Auckland', value: 'Pacific/Auckland' },
+                    ]}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.showFullUsageNumbers')} description={t('settings.showFullUsageNumbersDesc')}>
+                  <Select
+                    value={settingsForm.show_full_usage_numbers ? 'true' : 'false'}
+                    onValueChange={(value) => autoSaveBooleanField('show_full_usage_numbers', value)}
+                    options={booleanOptions}
+                  />
+                </SettingField>
+              </div>
             </SettingsCard>
           </div>
+
+          <SettingsCard title={t('settings.backgroundImage')} description={t('settings.backgroundImageDesc')}>
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.65fr)]">
+              <div className="relative aspect-[16/7] min-h-[220px] overflow-hidden rounded-lg border border-border bg-muted/40 shadow-sm max-sm:aspect-[4/3]">
+                {backgroundImagePreview && backgroundIsVideo ? (
+                  <video
+                    src={backgroundImagePreview}
+                    className="size-full object-cover"
+                    style={{
+                      opacity: Math.min(100, Math.max(0, settingsForm.background_opacity)) / 100,
+                      filter: settingsForm.background_blur > 0 ? `blur(${settingsForm.background_blur}px)` : undefined,
+                      transform: settingsForm.background_blur > 0 ? 'scale(1.04)' : undefined,
+                    }}
+                    autoPlay
+                    muted
+                    loop
+                    playsInline
+                  />
+                ) : backgroundImagePreview ? (
+                  <img
+                    src={backgroundImagePreview}
+                    alt=""
+                    className="size-full object-cover"
+                    style={{
+                      opacity: Math.min(100, Math.max(0, settingsForm.background_opacity)) / 100,
+                      filter: settingsForm.background_blur > 0 ? `blur(${settingsForm.background_blur}px)` : undefined,
+                      transform: settingsForm.background_blur > 0 ? 'scale(1.04)' : undefined,
+                    }}
+                  />
+                ) : (
+                  <div className="flex size-full items-center justify-center text-xs font-medium text-muted-foreground">
+                    {t('settings.backgroundImageEmpty')}
+                  </div>
+                )}
+              </div>
+              <div className="flex min-w-0 flex-col justify-between gap-5">
+                <div className="min-w-0 space-y-3">
+                  <Input
+                    value={settingsForm.background_image}
+                    placeholder="/wallpaper.jpg or https://..."
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_image: e.target.value }))}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => backgroundFileInputRef.current?.click()}>
+                      <Upload className="size-4" />
+                      {t('settings.backgroundImageUpload')}
+                    </Button>
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setSettingsForm(f => ({ ...f, background_image: '' }))}>
+                      <X className="size-4" />
+                      {t('settings.backgroundImageReset')}
+                    </Button>
+                  </div>
+                  <input
+                    ref={backgroundFileInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/svg+xml,video/mp4,.png,.jpg,.jpeg,.webp,.svg,.mp4"
+                    className="hidden"
+                    onChange={handleBackgroundImageUpload}
+                  />
+                </div>
+                <div className="grid gap-4">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
+                      <span>{t('settings.backgroundOpacity')}</span>
+                      <span>{settingsForm.background_opacity}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={settingsForm.background_opacity}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_opacity: parseInt(e.target.value) || 0 }))}
+                      className="w-full accent-primary"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
+                      <span>{t('settings.backgroundBlur')}</span>
+                      <span>{settingsForm.background_blur}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={24}
+                      value={settingsForm.background_blur}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_blur: parseInt(e.target.value) || 0 }))}
+                      className="w-full accent-primary"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
+                      <span>{t('settings.backgroundGlassOpacity')}</span>
+                      <span>{settingsForm.background_glass_opacity}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={settingsForm.background_glass_opacity}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_glass_opacity: parseInt(e.target.value) || 0 }))}
+                      className="w-full accent-primary"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
+                      <span>{t('settings.backgroundGlassBlur')}</span>
+                      <span>{settingsForm.background_glass_blur}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={20}
+                      value={settingsForm.background_glass_blur}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_glass_blur: parseInt(e.target.value) || 0 }))}
+                      className="w-full accent-primary"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </SettingsCard>
 
           <SettingsCard title={showConnectionPool ? t('settings.connectionPool') : t('settings.resinTitle')} description={showConnectionPool ? undefined : t('settings.resinDesc')}>
             <div className="space-y-5">
@@ -713,7 +1926,11 @@ export default function Settings() {
                     <div key={model.id} className="flex h-fit flex-wrap items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5">
                       <span className="font-mono text-xs font-semibold text-foreground">{model.id}</span>
                       <Badge variant={model.source === 'official_codex_docs' ? 'default' : 'secondary'} className="text-[11px]">
-                        {model.source === 'official_codex_docs' ? t('settings.modelSourceOfficial') : t('settings.modelSourceBuiltin')}
+                        {model.source === 'official_codex_docs'
+                          ? t('settings.modelSourceOfficial')
+                          : model.source === 'reasoning_effort'
+                            ? t('settings.modelSourceReasoning')
+                            : t('settings.modelSourceBuiltin')}
                       </Badge>
                       {model.pro_only ? <Badge variant="outline" className="text-[11px]">{t('settings.modelProOnly')}</Badge> : null}
                       {model.category === 'image' ? <Badge variant="outline" className="text-[11px]">{t('settings.modelImage')}</Badge> : null}
@@ -724,14 +1941,50 @@ export default function Settings() {
             </SettingsCard>
 
             <SettingsCard
-              title={t('settings2.modelMapping')}
-              description={t('settings2.modelMappingDesc')}
+              title={t('settings2.anthropicModelMapping')}
+              description={t('settings2.anthropicModelMappingDesc')}
               className="h-full xl:h-[430px]"
               contentClassName="flex h-full min-h-0 flex-col"
             >
               <ModelMappingEditor
                 value={settingsForm.model_mapping}
                 onChange={(v) => setSettingsForm(f => ({ ...f, model_mapping: v }))}
+                fallbackEntries={defaultClaudeModelMappingEntries}
+                sourceLabel={t('settings2.anthropicModel')}
+                targetLabel={t('settings2.codexModel')}
+                sourcePlaceholder="claude-opus-4-6"
+                targetPlaceholder="gpt-5.5"
+              />
+            </SettingsCard>
+
+            <SettingsCard
+              title={t('settings2.codexModelMapping')}
+              description={t('settings2.codexModelMappingDesc')}
+              className="h-full xl:h-[430px]"
+              contentClassName="flex h-full min-h-0 flex-col"
+            >
+              <ModelMappingEditor
+                value={settingsForm.codex_model_mapping}
+                onChange={(v) => setSettingsForm(f => ({ ...f, codex_model_mapping: v }))}
+                sourceOptions={codexModelOptions}
+                targetOptions={codexModelOptions}
+                sourceLabel={t('settings2.requestedModel')}
+                targetLabel={t('settings2.targetModel')}
+                sourcePlaceholder="gpt-5.2"
+                targetPlaceholder="gpt-5.5"
+              />
+            </SettingsCard>
+
+            <SettingsCard
+              title={t('settings2.reasoningEffortModels')}
+              description={t('settings2.reasoningEffortModelsDesc')}
+              className="h-full xl:h-[430px]"
+              contentClassName="flex h-full min-h-0 flex-col"
+            >
+              <ReasoningEffortModelsEditor
+                value={settingsForm.reasoning_effort_models}
+                onChange={(v) => setSettingsForm(f => ({ ...f, reasoning_effort_models: v }))}
+                baseModelOptions={textModelOptions}
               />
             </SettingsCard>
           </div>
@@ -789,7 +2042,6 @@ export default function Settings() {
           </div>
         </div>
 
-        <ToastNotice toast={toast} />
       </>
     </StateShell>
   )

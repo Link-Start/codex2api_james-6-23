@@ -3,12 +3,17 @@ import type {
   AccountUsageDetail,
   AddAccountRequest,
   AddATAccountRequest,
+  AddOpenAIResponsesAccountRequest,
   AdminErrorResponse,
   APIKeysResponse,
+  APIKeyTokenStat,
   AccountsResponse,
   ChartAggregation,
   CreateAccountResponse,
   CreateAPIKeyResponse,
+  CreateAPIKeyRequest,
+  FetchOpenAIResponsesModelsRequest,
+  FetchOpenAIResponsesModelsResponse,
   CreateImageJobPayload,
   HealthResponse,
   ImageAssetsResponse,
@@ -22,17 +27,29 @@ import type {
   ModelsResponse,
   OAuthExchangeResponse,
   OAuthURLResponse,
+  OpsErrorSummary,
   OpsOverviewResponse,
   PromptFilterLogsResponse,
   PromptFilterRulesResponse,
   PromptFilterTestResponse,
+  RuntimeStatusResponse,
+  ResetRadarResponse,
+  SiteBranding,
   StatsResponse,
+  SetupHintsResponse,
   CPAExportEntry,
   SystemSettings,
   UpdateAccountSchedulerRequest,
+  UpdateAPIKeyRequest,
+  UpdateOpenAIResponsesAccountRequest,
   UsageLogsResponse,
   UsageLogsPagedResponse,
   UsageStats,
+  AccountGroup,
+  AccountGroupsResponse,
+  BackgroundUploadResponse,
+  CreateAccountGroupRequest,
+  UpdateAccountGroupRequest,
 } from './types'
 
 const BASE = '/api/admin'
@@ -80,7 +97,8 @@ function extractAdminErrorMessage(body: string, status: number): string {
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
-  if (options.body !== undefined && options.body !== null && !headers.has('Content-Type')) {
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
+  if (options.body !== undefined && options.body !== null && !isFormData && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
 
@@ -91,6 +109,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   const res = await fetch(BASE + path, {
     ...options,
+    cache: options.cache ?? 'no-store',
     headers,
   })
 
@@ -99,6 +118,20 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     if (res.status === 401) {
       resetAdminAuthState()
     }
+    throw new Error(extractAdminErrorMessage(body, res.status))
+  }
+
+  return (await res.json()) as T
+}
+
+async function requestPublic<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const res = await fetch(path, {
+    ...options,
+    cache: options.cache ?? 'no-store',
+  })
+
+  if (!res.ok) {
+    const body = await res.text()
     throw new Error(extractAdminErrorMessage(body, res.status))
   }
 
@@ -130,19 +163,63 @@ async function requestBlob(path: string, options: RequestInit = {}): Promise<Blo
   return res.blob()
 }
 
+function buildOpsErrorSearchParams(params: {
+  start: string
+  end: string
+  status?: string
+  errorKind?: string
+  endpoint?: string
+  apiKeyId?: string
+  stream?: string
+  fast?: string
+  q?: string
+  dedupe?: boolean
+  excludeStatus?: string
+}) {
+  const search = new URLSearchParams()
+  search.set('start', params.start)
+  search.set('end', params.end)
+  if (params.status) search.set('status', params.status)
+  if (params.errorKind) search.set('error_kind', params.errorKind)
+  if (params.endpoint) search.set('endpoint', params.endpoint)
+  if (params.apiKeyId) search.set('api_key_id', params.apiKeyId)
+  if (params.stream) search.set('stream', params.stream)
+  if (params.fast) search.set('fast', params.fast)
+  if (params.q) search.set('q', params.q)
+  if (typeof params.dedupe === 'boolean') search.set('dedupe', String(params.dedupe))
+  if (params.excludeStatus) search.set('exclude_status', params.excludeStatus)
+  return search
+}
+
 export const api = {
+  getBranding: () => requestPublic<SiteBranding>('/api/branding'),
   getStats: () => request<StatsResponse>('/stats'),
   getAccounts: () => request<AccountsResponse>('/accounts'),
   addAccount: (data: AddAccountRequest) =>
     request<CreateAccountResponse>('/accounts', { method: 'POST', body: JSON.stringify(data) }),
   addATAccount: (data: AddATAccountRequest) =>
     request<CreateAccountResponse>('/accounts/at', { method: 'POST', body: JSON.stringify(data) }),
+  addOpenAIResponsesAccount: (data: AddOpenAIResponsesAccountRequest) =>
+    request<CreateAccountResponse>('/accounts/openai-responses', { method: 'POST', body: JSON.stringify(data) }),
+  fetchOpenAIResponsesModels: (data: FetchOpenAIResponsesModelsRequest) =>
+    request<FetchOpenAIResponsesModelsResponse>('/accounts/openai-responses/models', { method: 'POST', body: JSON.stringify(data) }),
+  updateOpenAIResponsesAccount: (id: number, data: UpdateOpenAIResponsesAccountRequest) =>
+    request<MessageResponse>(`/accounts/${id}/openai-responses`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAccount: (id: number) =>
     request<MessageResponse>(`/accounts/${id}`, { method: 'DELETE' }),
   refreshAccount: (id: number) =>
     request<MessageResponse>(`/accounts/${id}/refresh`, { method: 'POST' }),
+  forceUsageProbe: () =>
+    request<{ triggered: boolean; concurrency: number; reason?: string; mode?: string }>(`/accounts/usage/probe`, { method: 'POST' }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
+  listAccountGroups: () => request<AccountGroupsResponse>('/account-groups'),
+  createAccountGroup: (data: CreateAccountGroupRequest) =>
+    request<{ id: number; message: string }>('/account-groups', { method: 'POST', body: JSON.stringify(data) }),
+  updateAccountGroup: (id: number, data: UpdateAccountGroupRequest) =>
+    request<MessageResponse>(`/account-groups/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteAccountGroup: (id: number, force = false) =>
+    request<MessageResponse>(`/account-groups/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
   toggleAccountEnabled: (id: number, enabled: boolean) =>
     request<MessageResponse>(`/accounts/${id}/enable`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   toggleAccountLock: (id: number, locked: boolean) =>
@@ -151,11 +228,82 @@ export const api = {
     request<MessageResponse>(`/accounts/${id}/reset-status`, { method: 'POST' }),
   batchResetStatus: (ids: number[]) =>
     request<{ message: string; success: number; failed: number }>('/accounts/batch-reset-status', { method: 'POST', body: JSON.stringify({ ids }) }),
-  getAccountUsage: (id: number) =>
-    request<AccountUsageDetail>(`/accounts/${id}/usage`),
+  getAccountUsage: (id: number, days?: number) => {
+    const search = new URLSearchParams()
+    if (typeof days === 'number') search.set('days', String(days))
+    const qs = search.toString()
+    return request<AccountUsageDetail>(`/accounts/${id}/usage${qs ? `?${qs}` : ''}`)
+  },
+  updateAccountCredit: (id: number, data: { credit_enabled: boolean; credit_skip_usage_window: boolean }) =>
+    request<MessageResponse>(`/accounts/${id}/credit`, { method: 'PATCH', body: JSON.stringify(data) }),
   getHealth: () => request<HealthResponse>('/health'),
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
-  getUsageStats: () => request<UsageStats>('/usage/stats'),
+  getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
+  getResetRadar: () => request<ResetRadarResponse>('/reset-radar'),
+  getOpsErrorSummary: (params: {
+    start: string
+    end: string
+    status?: string
+    errorKind?: string
+    endpoint?: string
+    apiKeyId?: string
+    stream?: string
+    fast?: string
+    q?: string
+  }) => {
+    const search = buildOpsErrorSearchParams(params)
+    return request<OpsErrorSummary>(`/ops/errors/summary?${search.toString()}`)
+  },
+  getOpsErrors: (params: {
+    start: string
+    end: string
+    page: number
+    pageSize?: number
+    status?: string
+    errorKind?: string
+    endpoint?: string
+    apiKeyId?: string
+    stream?: string
+    fast?: string
+    q?: string
+  }) => {
+    const search = buildOpsErrorSearchParams(params)
+    search.set('page', String(params.page))
+    if (params.pageSize) search.set('page_size', String(params.pageSize))
+    return request<UsageLogsPagedResponse>(`/ops/errors?${search.toString()}`)
+  },
+  downloadOpsErrors: (params: {
+    start: string
+    end: string
+    status?: string
+    errorKind?: string
+    endpoint?: string
+    apiKeyId?: string
+    stream?: string
+    fast?: string
+    q?: string
+    dedupe?: boolean
+    excludeStatus?: string
+  }) => {
+    const search = buildOpsErrorSearchParams(params)
+    return requestBlob(`/ops/errors/export?${search.toString()}`)
+  },
+  getUsageStats: (params: { start?: string; end?: string } = {}) => {
+    const searchParams = new URLSearchParams()
+    if (params.start) searchParams.set('start', params.start)
+    if (params.end) searchParams.set('end', params.end)
+    const qs = searchParams.toString()
+    return request<UsageStats>(qs ? `/usage/stats?${qs}` : '/usage/stats')
+  },
+  getAPIKeyTokenStats: (params: { start?: string; end?: string } = {}) => {
+    const searchParams = new URLSearchParams()
+    if (params.start) searchParams.set('start', params.start)
+    if (params.end) searchParams.set('end', params.end)
+    const qs = searchParams.toString()
+    return request<{ items: APIKeyTokenStat[] }>(
+      qs ? `/usage/api-keys?${qs}` : '/usage/api-keys',
+    )
+  },
   getUsageLogs: (params: { start?: string; end?: string; limit?: number } = {}) => {
     const searchParams = new URLSearchParams()
     if (params.start && params.end) {
@@ -166,7 +314,7 @@ export const api = {
     }
     return request<UsageLogsResponse>(`/usage/logs?${searchParams.toString()}`)
   },
-  getUsageLogsPaged: (params: { start: string; end: string; page: number; pageSize?: number; email?: string; model?: string; endpoint?: string; apiKeyId?: string; fast?: string; stream?: string }) => {
+  getUsageLogsPaged: (params: { start: string; end: string; page: number; pageSize?: number; email?: string; model?: string; endpoint?: string; apiKeyId?: string; accountId?: string; fast?: string; stream?: string }) => {
     const searchParams = new URLSearchParams()
     searchParams.set('start', params.start)
     searchParams.set('end', params.end)
@@ -176,6 +324,7 @@ export const api = {
     if (params.model) searchParams.set('model', params.model)
     if (params.endpoint) searchParams.set('endpoint', params.endpoint)
     if (params.apiKeyId) searchParams.set('api_key_id', params.apiKeyId)
+    if (params.accountId) searchParams.set('account_id', params.accountId)
     if (params.fast) searchParams.set('fast', params.fast)
     if (params.stream) searchParams.set('stream', params.stream)
     return request<UsageLogsPagedResponse>(`/usage/logs?${searchParams.toString()}`)
@@ -195,13 +344,15 @@ export const api = {
     return request<{ trend: AccountEventTrendPoint[] }>(`/accounts/event-trend?${sp.toString()}`)
   },
   getAPIKeys: () => request<APIKeysResponse>('/keys'),
-  createAPIKey: (name: string, key?: string) =>
+  createAPIKey: (data: CreateAPIKeyRequest) =>
     request<CreateAPIKeyResponse>('/keys', {
       method: 'POST',
-      body: JSON.stringify({ name, ...(key ? { key } : {}) }),
+      body: JSON.stringify(data),
     }),
   deleteAPIKey: (id: number) =>
     request<MessageResponse>(`/keys/${id}`, { method: 'DELETE' }),
+  updateAPIKey: (id: number, data: UpdateAPIKeyRequest) =>
+    request<MessageResponse>(`/keys/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   getImagePromptTemplates: (params: { q?: string; tag?: string } = {}) => {
     const sp = new URLSearchParams()
     if (params.q) sp.set('q', params.q)
@@ -217,6 +368,8 @@ export const api = {
     request<MessageResponse>(`/image-prompts/${id}`, { method: 'DELETE' }),
   createImageJob: (data: CreateImageJobPayload) =>
     request<ImageJobResponse>('/images/jobs', { method: 'POST', body: JSON.stringify(data) }),
+  createImageEditJob: (data: CreateImageJobPayload) =>
+    request<ImageJobResponse>('/images/edit-jobs', { method: 'POST', body: JSON.stringify(data) }),
   getImageJobs: (params: { page?: number; pageSize?: number } = {}) => {
     const sp = new URLSearchParams()
     if (params.page) sp.set('page', String(params.page))
@@ -229,6 +382,8 @@ export const api = {
     const query = sp.toString()
     return request<ImageJobResponse>(`/images/jobs/${id}${query ? `?${query}` : ''}`)
   },
+  deleteImageJob: (id: number) =>
+    request<MessageResponse>(`/images/jobs/${id}`, { method: 'DELETE' }),
   getImageAssets: (params: { page?: number; pageSize?: number } = {}) => {
     const sp = new URLSearchParams()
     if (params.page) sp.set('page', String(params.page))
@@ -246,9 +401,28 @@ export const api = {
     request<MessageResponse>(`/images/assets/${id}`, { method: 'DELETE' }),
   clearUsageLogs: () =>
     request<MessageResponse>('/usage/logs', { method: 'DELETE' }),
+  getSetupHints: () => request<SetupHintsResponse>('/setup-hints'),
   getSettings: () => request<SystemSettings>('/settings'),
   updateSettings: (data: Partial<SystemSettings>) =>
     request<SystemSettings>('/settings', { method: 'PUT', body: JSON.stringify(data) }),
+  uploadBackground: (file: File) => {
+    const form = new FormData()
+    form.set('file', file)
+    return request<BackgroundUploadResponse>('/settings/background-upload', { method: 'POST', body: form })
+  },
+  testImageStorageConnection: (data: {
+    endpoint: string
+    region: string
+    bucket: string
+    access_key: string
+    secret_key: string
+    prefix: string
+    force_path_style: boolean
+  }) =>
+    request<{ ok: boolean; bucket: string }>('/settings/image-storage/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   getPromptFilterLogs: (params: number | { page?: number; pageSize?: number; limit?: number; source?: string; action?: string; endpoint?: string; model?: string; apiKeyId?: string; q?: string } = 100) => {
     const search = new URLSearchParams()
     if (typeof params === 'number') {
@@ -274,8 +448,11 @@ export const api = {
     request<PromptFilterRulesResponse>('/prompt-filter/rules'),
   getModels: () => request<ModelsResponse>('/models'),
   syncModels: () => request<ModelSyncResponse>('/models/sync', { method: 'POST' }),
-  batchTestAccounts: () =>
-    request<{ total: number; success: number; failed: number; banned: number; rate_limited: number }>('/accounts/batch-test', { method: 'POST' }),
+  batchTestAccounts: (ids?: number[]) =>
+    request<{ total: number; success: number; failed: number; banned: number; rate_limited: number }>('/accounts/batch-test', {
+      method: 'POST',
+      body: ids ? JSON.stringify({ ids }) : undefined,
+    }),
   cleanBanned: () =>
     request<{ message: string; cleaned: number }>('/accounts/clean-banned', { method: 'POST' }),
   cleanRateLimited: () =>
@@ -299,7 +476,7 @@ export const api = {
     request<{ message: string; inserted: number; total: number }>('/proxies', { method: 'POST', body: JSON.stringify(data) }),
   deleteProxy: (id: number) =>
     request<MessageResponse>(`/proxies/${id}`, { method: 'DELETE' }),
-  updateProxy: (id: number, data: { label?: string; enabled?: boolean }) =>
+  updateProxy: (id: number, data: { url?: string; label?: string; enabled?: boolean }) =>
     request<MessageResponse>(`/proxies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   batchDeleteProxies: (ids: number[]) =>
     request<{ message: string; deleted: number }>('/proxies/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),

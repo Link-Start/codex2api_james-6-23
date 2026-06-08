@@ -26,6 +26,8 @@ Thumbs.db
 # Env
 .env
 .env.local
+.env.bak.*
+.deploy/
 USAGE_WINDOW_LOGIC.md
 .claude/settings.local.json
 scripts
@@ -35,3 +37,5 @@ logs/
 AGMENT.md
 CLIProxyAPI/
 sub2api/
+new-api/
+.gstack/

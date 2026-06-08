@@ -43,6 +43,13 @@ const (
 	defaultImages4KSquareSize    = "2880x2880"
 
 	maxGPTImage2Pixels = 8294400
+
+	// maxImageAttempts caps the total number of upstream attempts for image
+	// generation requests, including retries across different accounts.
+	maxImageAttempts = 5
+
+	// MaxImageEditInputCount caps the number of input images for edit requests.
+	MaxImageEditInputCount = 10
 )
 
 type imageCallResult struct {
@@ -78,6 +85,11 @@ func decodeImageBase64(raw string) ([]byte, bool) {
 	if encoded == "" {
 		return nil, false
 	}
+	// Guard against extremely large inputs (100 MB limit).
+	const maxDecodeInputLen = 100 * 1024 * 1024
+	if len(encoded) > maxDecodeInputLen {
+		return nil, false
+	}
 	if strings.HasPrefix(strings.ToLower(encoded), "data:") {
 		if comma := strings.Index(encoded, ","); comma >= 0 {
 			encoded = encoded[comma+1:]
@@ -86,12 +98,24 @@ func decodeImageBase64(raw string) ([]byte, bool) {
 	if strings.ContainsAny(encoded, " \t\r\n") {
 		encoded = strings.NewReplacer(" ", "", "\t", "", "\r", "", "\n", "").Replace(encoded)
 	}
-	for _, encoding := range []*base64.Encoding{
+	// Prefer URL-safe encodings when the input contains '-' or '_'
+	// (characters that only appear in URL-safe base64).
+	preferURLSafe := strings.ContainsAny(encoded, "-_")
+	encodings := [4]*base64.Encoding{
 		base64.StdEncoding,
 		base64.RawStdEncoding,
 		base64.URLEncoding,
 		base64.RawURLEncoding,
-	} {
+	}
+	if preferURLSafe {
+		encodings = [4]*base64.Encoding{
+			base64.URLEncoding,
+			base64.RawURLEncoding,
+			base64.StdEncoding,
+			base64.RawStdEncoding,
+		}
+	}
+	for _, encoding := range encodings {
 		data, err := encoding.DecodeString(encoded)
 		if err == nil {
 			return data, true
@@ -483,6 +507,45 @@ func validateResponsesImageGenerationSizes(body []byte) error {
 	return nil
 }
 
+func responsesBodyHasImageGenerationTool(body []byte) bool {
+	tools := gjson.GetBytes(body, "tools")
+	if tools.Exists() && tools.IsArray() {
+		for _, tool := range tools.Array() {
+			if strings.TrimSpace(tool.Get("type").String()) == "image_generation" {
+				return true
+			}
+		}
+	}
+	choice := gjson.GetBytes(body, "tool_choice")
+	if !choice.Exists() {
+		return false
+	}
+	if choice.Type == gjson.String {
+		return strings.EqualFold(strings.TrimSpace(choice.String()), "image_generation")
+	}
+	return strings.EqualFold(strings.TrimSpace(choice.Get("type").String()), "image_generation")
+}
+
+func responsesBodyRequestsImageGeneration(body []byte) bool {
+	if isImageOnlyModel(gjson.GetBytes(body, "model").String()) {
+		return true
+	}
+	choice := gjson.GetBytes(body, "tool_choice")
+	if choice.Type == gjson.String && strings.EqualFold(strings.TrimSpace(choice.String()), "image_generation") {
+		return true
+	}
+	if choice.Exists() && strings.EqualFold(strings.TrimSpace(choice.Get("type").String()), "image_generation") {
+		return true
+	}
+	for _, key := range responsesImageGenerationOptionFields {
+		value := gjson.GetBytes(body, key)
+		if value.Exists() && value.Type != gjson.Null {
+			return true
+		}
+	}
+	return false
+}
+
 func validateImagesModel(model string) error {
 	if !isImageOnlyModel(model) {
 		return fmt.Errorf("images endpoint requires an image model, got %q", strings.TrimSpace(model))
@@ -550,6 +613,13 @@ func multipartFileToDataURL(fileHeader *multipart.FileHeader) (string, error) {
 	if fileHeader == nil {
 		return "", fmt.Errorf("upload file is nil")
 	}
+	const maxImageUploadBytes = 20 * 1024 * 1024
+	if fileHeader.Size > maxImageUploadBytes {
+		return "", fmt.Errorf("upload file too large (%d bytes, max %d)", fileHeader.Size, maxImageUploadBytes)
+	}
+	if fileHeader.Size == 0 {
+		return "", fmt.Errorf("upload file is empty")
+	}
 	file, err := fileHeader.Open()
 	if err != nil {
 		return "", fmt.Errorf("open upload file failed: %w", err)
@@ -589,9 +659,17 @@ func (h *Handler) ImagesGenerations(c *gin.Context) {
 	}
 
 	imageModel := strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
+	modelProvided := imageModel != ""
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
+	requestModel := imageModel
+	if modelProvided {
+		if mappedModel, ok := h.resolveConfiguredRequestModel(imageModel, h.supportedModelIDs(c.Request.Context())); ok {
+			imageModel = mappedModel
+		}
+	}
+	logEffectiveModel := usageEffectiveModelForMapping(requestModel, imageModel, !strings.EqualFold(requestModel, imageModel))
 	if err := validateImagesModel(imageModel); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
 		return
@@ -606,6 +684,9 @@ func (h *Handler) ImagesGenerations(c *gin.Context) {
 	style := strings.TrimSpace(gjson.GetBytes(rawBody, "style").String())
 	promptForRequest := AppendImageStyleToPrompt(prompt, style)
 	if h.inspectPromptFilterTextOpenAI(c, promptForRequest, "/v1/images/generations", imageModel) {
+		return
+	}
+	if h.enforceAPIKeyLimitsAndReply(c, imageModel) {
 		return
 	}
 	tool := []byte(`{"type":"image_generation","action":"generate","model":""}`)
@@ -624,7 +705,7 @@ func (h *Handler) ImagesGenerations(c *gin.Context) {
 	tool = setDefaultImageToolSize(tool, defaultSize)
 
 	responsesBody := buildImagesResponsesRequest(promptForRequest, nil, tool)
-	h.forwardImagesRequest(c, "/v1/images/generations", imageModel, responsesBody, responseFormat, "image_generation", stream)
+	h.forwardImagesRequest(c, "/v1/images/generations", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_generation", stream)
 }
 
 func (h *Handler) ImagesEdits(c *gin.Context) {
@@ -666,6 +747,10 @@ func (h *Handler) imagesEditsFromMultipart(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: image is required", "type": "invalid_request_error"}})
 		return
 	}
+	if len(imageFiles) > MaxImageEditInputCount {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": fmt.Sprintf("Invalid request: too many input images (%d, max %d)", len(imageFiles), MaxImageEditInputCount), "type": "invalid_request_error"}})
+		return
+	}
 
 	images := make([]string, 0, len(imageFiles))
 	for _, fileHeader := range imageFiles {
@@ -688,9 +773,17 @@ func (h *Handler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 
 	imageModel := strings.TrimSpace(c.PostForm("model"))
+	modelProvided := imageModel != ""
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
+	requestModel := imageModel
+	if modelProvided {
+		if mappedModel, ok := h.resolveConfiguredRequestModel(imageModel, h.supportedModelIDs(c.Request.Context())); ok {
+			imageModel = mappedModel
+		}
+	}
+	logEffectiveModel := usageEffectiveModelForMapping(requestModel, imageModel, !strings.EqualFold(requestModel, imageModel))
 	if err := validateImagesModel(imageModel); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
 		return
@@ -707,9 +800,12 @@ func (h *Handler) imagesEditsFromMultipart(c *gin.Context) {
 	if h.inspectPromptFilterTextOpenAI(c, promptForRequest, "/v1/images/edits", imageModel) {
 		return
 	}
+	if h.enforceAPIKeyLimitsAndReply(c, imageModel) {
+		return
+	}
 	tool := buildImagesEditToolFromForm(c, imageModel, maskDataURL)
 	responsesBody := buildImagesResponsesRequest(promptForRequest, images, tool)
-	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, responsesBody, responseFormat, "image_edit", stream)
+	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_edit", stream)
 }
 
 func buildImagesEditToolFromForm(c *gin.Context, imageModel, maskDataURL string) []byte {
@@ -770,6 +866,10 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: images[].image_url is required", "type": "invalid_request_error"}})
 		return
 	}
+	if len(images) > MaxImageEditInputCount {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": fmt.Sprintf("Invalid request: too many input images (%d, max %d)", len(images), MaxImageEditInputCount), "type": "invalid_request_error"}})
+		return
+	}
 
 	maskDataURL := strings.TrimSpace(gjson.GetBytes(rawBody, "mask.image_url").String())
 	if maskDataURL == "" && gjson.GetBytes(rawBody, "mask.file_id").Exists() {
@@ -778,9 +878,17 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 	}
 
 	imageModel := strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
+	modelProvided := imageModel != ""
 	if imageModel == "" {
 		imageModel = defaultImagesToolModel
 	}
+	requestModel := imageModel
+	if modelProvided {
+		if mappedModel, ok := h.resolveConfiguredRequestModel(imageModel, h.supportedModelIDs(c.Request.Context())); ok {
+			imageModel = mappedModel
+		}
+	}
+	logEffectiveModel := usageEffectiveModelForMapping(requestModel, imageModel, !strings.EqualFold(requestModel, imageModel))
 	if err := validateImagesModel(imageModel); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
 		return
@@ -795,6 +903,9 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 	style := strings.TrimSpace(gjson.GetBytes(rawBody, "style").String())
 	promptForRequest := AppendImageStyleToPrompt(prompt, style)
 	if h.inspectPromptFilterTextOpenAI(c, promptForRequest, "/v1/images/edits", imageModel) {
+		return
+	}
+	if h.enforceAPIKeyLimitsAndReply(c, imageModel) {
 		return
 	}
 	tool := []byte(`{"type":"image_generation","action":"edit","model":""}`)
@@ -816,7 +927,7 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 	tool = setDefaultImageToolSize(tool, defaultSize)
 
 	responsesBody := buildImagesResponsesRequest(promptForRequest, images, tool)
-	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, responsesBody, responseFormat, "image_edit", stream)
+	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_edit", stream)
 }
 
 func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
@@ -851,15 +962,19 @@ func imagePreferredAccountFilter(account *auth.Account) bool {
 	return auth.IsPlusOrHigherPlan(account.GetPlanType())
 }
 
-func (h *Handler) nextImageAccount(apiKeyID int64, exclude map[int64]bool) (*auth.Account, string) {
-	account, stickyProxyURL := h.nextAccountForSessionWithFilter("", apiKeyID, exclude, imagePreferredAccountFilter)
+func (h *Handler) nextImageAccount(apiKeyID int64, exclude map[int64]bool, model string) (*auth.Account, string) {
+	preferredFilter := h.withModelCooldownFilter(model, imagePreferredAccountFilter)
+	account, stickyProxyURL := h.nextAccountForSessionWithFilter("", apiKeyID, exclude, preferredFilter)
 	if account != nil {
 		return account, stickyProxyURL
 	}
-	return h.nextAccountForSession("", apiKeyID, exclude)
+	return h.nextAccountForSessionWithFilter("", apiKeyID, exclude, h.withModelCooldownFilter(model, nil))
 }
 
-func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
+func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel, logModel, logEffectiveModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
+	if strings.TrimSpace(logModel) == "" {
+		logModel = requestModel
+	}
 	if err := validateResponsesImageGenerationSizes(responsesBody); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"message": "Invalid request: " + err.Error(), "type": "invalid_request_error"}})
 		return
@@ -867,21 +982,26 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 
 	apiKeyID := requestAPIKeyID(c)
 	maxRetries := h.getMaxRetries()
-	var lastErr error
+	maxRateLimitRetries := h.getMaxRateLimitRetries()
+	generalRetries := 0
+	rateLimitRetries := 0
 	var lastStatusCode int
 	var lastBody []byte
 	excludeAccounts := make(map[int64]bool)
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account, stickyProxyURL := h.nextImageAccount(apiKeyID, excludeAccounts)
+	for attempt := 0; attempt < maxImageAttempts; attempt++ {
+		if err := c.Request.Context().Err(); err != nil {
+			return
+		}
+		account, stickyProxyURL := h.nextImageAccount(apiKeyID, excludeAccounts, requestModel)
 		if account == nil {
-			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts)
+			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts, h.withModelCooldownFilter(requestModel, nil))
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
 					return
 				}
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"message": "无可用账号，请稍后重试", "type": "server_error"}})
+				c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(""))
 				return
 			}
 		}
@@ -894,7 +1014,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			deviceCfg = &DeviceProfileConfig{StabilizeDeviceProfile: false}
 		}
 
-		resp, reqErr := ExecuteRequest(c.Request.Context(), account, responsesBody, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), h.shouldUseWebsocketForHTTP())
+		resp, reqErr := ExecuteRequest(c.Request.Context(), account, responsesBody, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), false)
 		durationMs := int(time.Since(start).Milliseconds())
 		if reqErr != nil {
 			if kind := classifyTransportFailure(reqErr); kind != "" {
@@ -906,8 +1026,11 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				ErrorToGinResponse(c, reqErr)
 				return
 			}
-			lastErr = reqErr
-			continue
+			if shouldRetryRequestError(reqErr, &generalRetries, maxRetries) {
+				continue
+			}
+			ErrorToGinResponse(c, reqErr)
+			return
 		}
 
 		if resp.StatusCode != http.StatusOK {
@@ -921,10 +1044,26 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			resp.Body.Close()
 			h.store.Release(account)
 			excludeAccounts[account.ID()] = true
-			logUpstreamError(inboundEndpoint, resp.StatusCode, requestModel, account.ID(), errBody)
-			h.logUpstreamCyberPolicy(c, inboundEndpoint, requestModel, errBody)
-			h.applyCooldown(account, resp.StatusCode, errBody, resp)
-			if isRetryableStatus(resp.StatusCode) && attempt < maxRetries {
+			logUpstreamError(inboundEndpoint, resp.StatusCode, logModel, account.ID(), errBody)
+			h.logUpstreamCyberPolicy(c, inboundEndpoint, logModel, errBody)
+			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, requestModel)
+			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
+			h.logUsageForRequest(c, &database.UsageLogInput{
+				AccountID:         account.ID(),
+				Endpoint:          inboundEndpoint,
+				Model:             logModel,
+				EffectiveModel:    logEffectiveModel,
+				StatusCode:        resp.StatusCode,
+				DurationMs:        durationMs,
+				InboundEndpoint:   inboundEndpoint,
+				UpstreamEndpoint:  "/v1/responses",
+				Stream:            stream,
+				IsRetryAttempt:    shouldRetry,
+				AttemptIndex:      attempt + 1,
+				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, errBody, decision),
+				ErrorMessage:      usageLogErrorMessage(resp.StatusCode, errBody),
+			})
+			if shouldRetry {
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
 				continue
@@ -937,7 +1076,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		c.Set("x-account-email", account.Email)
 		account.Mu().RUnlock()
 		c.Set("x-account-proxy", proxyURL)
-		c.Set("x-model", requestModel)
+		c.Set("x-model", logModel)
 
 		var usage *UsageInfo
 		var firstTokenMs int
@@ -952,24 +1091,71 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			if readErr == nil {
 				c.Data(http.StatusOK, "application/json", out)
 			} else {
+				// Check retryability BEFORE writing error response to avoid
+				// double-write when the error is transient.
+				resp.Body.Close()
+				h.store.Release(account)
+				excludeAccounts[account.ID()] = true
+				if shouldRetryImageStreamError(readErr, &generalRetries, maxRetries, attempt, maxImageAttempts) {
+					lastStatusCode = http.StatusBadGateway
+					lastBody = []byte(readErr.Error())
+					continue
+				}
 				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": readErr.Error(), "type": "upstream_error"}})
+				h.logUsageForRequest(c, &database.UsageLogInput{
+					AccountID:      account.ID(),
+					Endpoint:       inboundEndpoint,
+					Model:          logModel,
+					EffectiveModel: logEffectiveModel,
+					StatusCode:     http.StatusBadGateway,
+				})
+				return
 			}
 		}
 
 		statusCode := http.StatusOK
 		if readErr != nil {
 			statusCode = http.StatusBadGateway
+			// Retry stream read errors on next account when there are attempts left.
+			// Stream disconnects and upstream image generation failures can be
+			// transient (e.g. upstream model overload, network hiccup).
+			resp.Body.Close()
+			h.store.Release(account)
+			excludeAccounts[account.ID()] = true
+			if shouldRetryImageStreamError(readErr, &generalRetries, maxRetries, attempt, maxImageAttempts) {
+				lastStatusCode = statusCode
+				lastBody = []byte(readErr.Error())
+				if !c.Writer.Written() {
+					continue
+				}
+			}
+			// Non-retryable -- deliver error response if nothing written yet.
+			if !c.Writer.Written() {
+				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": readErr.Error(), "type": "upstream_error"}})
+			}
+			h.logUsageForRequest(c, &database.UsageLogInput{
+				AccountID:      account.ID(),
+				Endpoint:       inboundEndpoint,
+				Model:          logModel,
+				EffectiveModel: logEffectiveModel,
+				StatusCode:     http.StatusBadGateway,
+			})
+			return
 		}
 		logInput := &database.UsageLogInput{
 			AccountID:        account.ID(),
 			Endpoint:         inboundEndpoint,
-			Model:            requestModel,
+			Model:            logModel,
+			EffectiveModel:   logEffectiveModel,
 			StatusCode:       statusCode,
 			DurationMs:       int(time.Since(start).Milliseconds()),
 			FirstTokenMs:     firstTokenMs,
 			InboundEndpoint:  inboundEndpoint,
 			UpstreamEndpoint: "/v1/responses",
 			Stream:           stream,
+		}
+		if readErr != nil {
+			logInput.ErrorMessage = usageLogErrorMessage(statusCode, []byte(readErr.Error()))
 		}
 		if usage != nil {
 			logInput.PromptTokens = usage.PromptTokens
@@ -993,17 +1179,44 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		if readErr != nil {
 			h.store.ReportRequestFailure(account, "transport", time.Duration(logInput.DurationMs)*time.Millisecond)
 		} else {
+			h.store.ClearModelCooldown(account, requestModel)
 			h.store.ReportRequestSuccess(account, time.Duration(logInput.DurationMs)*time.Millisecond)
 		}
 		h.store.Release(account)
 		return
 	}
-
-	if lastErr != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "上游请求失败: " + lastErr.Error(), "type": "upstream_error"}})
-	} else if lastStatusCode != 0 {
+	// Exhausted all attempts.
+	if lastStatusCode > 0 && len(lastBody) > 0 {
 		h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
+		return
 	}
+	c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(""))
+}
+
+// shouldRetryImageStreamError determines whether an image generation stream
+// read error warrants retrying on a different account. Transient failures
+// (stream disconnects, upstream model errors) are retryable; permanent
+// failures (content policy, invalid request, quota exhausted) are not.
+func shouldRetryImageStreamError(err error, generalRetries *int, maxGeneralRetries int, attempt int, maxAttempts int) bool {
+	if err == nil || generalRetries == nil || *generalRetries >= maxGeneralRetries {
+		return false
+	}
+	if attempt >= maxAttempts-1 {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Never retry content policy or safety violations.
+	for _, keyword := range []string{
+		"content_policy", "safety", "cyber_policy",
+		"unsupported_country", "invalid_request",
+	} {
+		if strings.Contains(msg, keyword) {
+			return false
+		}
+	}
+	// Retry transient upstream issues.
+	*generalRetries++
+	return true
 }
 
 func collectImagesResponse(body io.Reader, responseFormat, fallbackModel string) ([]byte, *UsageInfo, int, imageUsageLogInfo, error) {
@@ -1108,15 +1321,26 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		imageLogInfo   imageUsageLogInfo
 		readErr        error
 	)
+	streamWriter := newStreamFlushWriter(c.Writer, flusher)
 	writeEvent := func(eventName string, payload []byte) {
+		var builder strings.Builder
 		if strings.TrimSpace(eventName) != "" {
-			fmt.Fprintf(c.Writer, "event: %s\n", eventName)
+			builder.WriteString("event: ")
+			builder.WriteString(eventName)
+			builder.WriteString("\n")
 		}
-		fmt.Fprintf(c.Writer, "data: %s\n\n", payload)
-		flusher.Flush()
+		builder.WriteString("data: ")
+		builder.Write(payload)
+		builder.WriteString("\n\n")
+		if err := streamWriter.WriteString(builder.String()); err != nil && readErr == nil {
+			readErr = err
+		}
 	}
 
 	err := ReadSSEStream(body, func(data []byte) bool {
+		if readErr != nil {
+			return false
+		}
 		if firstTokenMs == 0 {
 			firstTokenMs = int(time.Since(start).Milliseconds())
 		}
@@ -1187,6 +1411,9 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 	})
 	if err != nil {
 		return usage, imageCount, firstTokenMs, imageLogInfo, err
+	}
+	if readErr == nil {
+		readErr = streamWriter.Flush()
 	}
 	if imageCount == 0 && len(pendingResults) > 0 && readErr == nil {
 		eventName := streamPrefix + ".completed"

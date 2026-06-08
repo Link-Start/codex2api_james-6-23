@@ -75,6 +75,64 @@ func TestValidateResponsesAPIRequestAllowsCompactionInputType(t *testing.T) {
 	}
 }
 
+func TestValidateResponsesAPIRequestAllowsOfficialContentInputTypes(t *testing.T) {
+	result := ValidateResponsesAPIRequest(
+		[]byte(`{
+			"model":"gpt-5.4",
+			"input":[
+				{"type":"input_text","text":"hello"},
+				{"type":"input_image","image_url":"https://example.com/cat.png"},
+				{"type":"input_file","file_id":"file_abc"},
+				{"type":"computer_screenshot","image_url":"https://example.com/screen.png"},
+				{"type":"summary_text","text":"summary"}
+			]
+		}`),
+		[]string{"gpt-5.4"},
+	)
+
+	if !result.Valid {
+		t.Fatalf("expected official Responses content input types to be valid, got %#v", result.Errors)
+	}
+}
+
+func TestValidateResponsesAPIRequestMaxOutputTokensCap(t *testing.T) {
+	tests := []struct {
+		name  string
+		body  []byte
+		valid bool
+	}{
+		{
+			name:  "gpt-5.5 allows 128k output tokens",
+			body:  []byte(`{"model":"gpt-5.5","input":"hello","max_output_tokens":128000}`),
+			valid: true,
+		},
+		{
+			name:  "gpt-5.5 rejects above 128k output tokens",
+			body:  []byte(`{"model":"gpt-5.5","input":"hello","max_output_tokens":128001}`),
+			valid: false,
+		},
+		{
+			name:  "other models also allow up to 128k (aligned cap, upstream decides actual ceiling)",
+			body:  []byte(`{"model":"gpt-5.4","input":"hello","max_output_tokens":100000}`),
+			valid: true,
+		},
+		{
+			name:  "other models reject above 128k",
+			body:  []byte(`{"model":"gpt-5.4","input":"hello","max_output_tokens":128001}`),
+			valid: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := ValidateResponsesAPIRequest(test.body, []string{"gpt-5.5", "gpt-5.4"})
+			if result.Valid != test.valid {
+				t.Fatalf("Valid = %v, want %v; errors=%#v", result.Valid, test.valid, result.Errors)
+			}
+		})
+	}
+}
+
 func TestValidateResponsesAPIRequestRejectsUnknownInputType(t *testing.T) {
 	result := ValidateResponsesAPIRequest(
 		[]byte(`{"model":"gpt-5.4","input":[{"type":"unknown_call","call_id":"call_1"}]}`),

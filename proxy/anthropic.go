@@ -26,6 +26,7 @@ type anthropicRequest struct {
 	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
 	ToolChoice   json.RawMessage        `json:"tool_choice,omitempty"`
 	Metadata     json.RawMessage        `json:"metadata,omitempty"`
+	Speed        string                 `json:"speed,omitempty"`
 }
 
 type anthropicThinking struct {
@@ -137,8 +138,8 @@ func canonicalizeCodexModel(model string, supportedModels []string) string {
 		return ""
 	}
 	for _, supported := range supportedModels {
-		if trimmed == supported {
-			return trimmed
+		if strings.EqualFold(trimmed, supported) {
+			return supported
 		}
 	}
 
@@ -172,14 +173,9 @@ func canonicalizeCodexModel(model string, supportedModels []string) string {
 func resolveAnthropicModel(model string, dynamicMappingJSON string, supportedModels []string) string {
 	model = strings.TrimSpace(model)
 
-	// 1. 尝试动态映射（从系统设置）
-	if dynamicMappingJSON != "" && dynamicMappingJSON != "{}" {
-		var dynamicMap map[string]string
-		if json.Unmarshal([]byte(dynamicMappingJSON), &dynamicMap) == nil {
-			if mapped, ok := dynamicMap[model]; ok && mapped != "" {
-				return canonicalizeCodexModel(mapped, supportedModels)
-			}
-		}
+	// 1. 尝试动态映射（从系统设置，支持精确和 * 通配）
+	if mapped, ok := resolveConfiguredModelMapping(model, dynamicMappingJSON, supportedModels); ok {
+		return mapped
 	}
 
 	// 2. 尝试默认映射
@@ -240,6 +236,10 @@ func TranslateAnthropicToCodex(rawJSON []byte, modelMappingJSON string) ([]byte,
 	return TranslateAnthropicToCodexWithModels(rawJSON, modelMappingJSON, SupportedModels)
 }
 
+func shouldUseCodexPriorityForAnthropicSpeed(speed string) bool {
+	return strings.ToLower(strings.TrimSpace(speed)) == "fast"
+}
+
 // TranslateAnthropicToCodexWithModels 将 Anthropic Messages 请求转换为 Codex Responses 格式
 // 返回: (codex 请求体, 原始 Anthropic model 名, error)
 func TranslateAnthropicToCodexWithModels(rawJSON []byte, modelMappingJSON string, supportedModels []string) ([]byte, string, error) {
@@ -269,6 +269,12 @@ func TranslateAnthropicToCodexWithModels(rawJSON []byte, modelMappingJSON string
 	out["reasoning"] = map[string]any{
 		"effort":  resolveReasoningEffort(req.OutputConfig),
 		"summary": "auto",
+	}
+
+	if shouldUseCodexPriorityForAnthropicSpeed(req.Speed) {
+		if upstreamTier, ok := upstreamServiceTier("priority"); ok {
+			out["service_tier"] = upstreamTier
+		}
 	}
 
 	// tools
@@ -410,7 +416,9 @@ func appendAssistantBlocks(input []any, blocks []anthropicContentBlock) []any {
 			}
 			args := "{}"
 			if len(b.Input) > 0 {
-				args = string(b.Input)
+				if cleaned := sanitizeToolInputJSON(string(b.Input)); cleaned != "" {
+					args = cleaned
+				}
 			}
 			input = append(input, map[string]any{
 				"type":      "function_call",
@@ -530,18 +538,19 @@ func convertAnthropicToolChoice(raw json.RawMessage) any {
 
 // anthropicStreamTranslator 有状态的流式响应翻译器（Codex → Anthropic）
 type anthropicStreamTranslator struct {
-	model              string
-	responseID         string
-	messageStartSent   bool
-	contentBlockIndex  int
-	contentBlockOpen   bool
-	currentBlockType   string // "text" | "thinking" | "tool_use"
-	currentToolUseID   string
-	currentToolUseName string
-	hasToolUse         bool
-	inputTokens        int
-	outputTokens       int
-	cachedTokens       int
+	model                  string
+	responseID             string
+	messageStartSent       bool
+	contentBlockIndex      int
+	contentBlockOpen       bool
+	currentBlockType       string // "text" | "thinking" | "tool_use"
+	currentToolUseID       string
+	currentToolUseName     string
+	currentToolInputBuffer strings.Builder
+	hasToolUse             bool
+	inputTokens            int
+	outputTokens           int
+	cachedTokens           int
 }
 
 // newAnthropicStreamTranslator 创建流式翻译器
@@ -749,22 +758,17 @@ func (t *anthropicStreamTranslator) handleThinkingDelta(data []byte) []anthropic
 	return events
 }
 
-// handleToolInputDelta 处理工具调用参数增量
+// handleToolInputDelta 缓冲工具调用参数增量。
+// 不直接转发为 input_json_delta：上游模型偶尔会塞入空可选字段（如 gpt-5.5
+// 给 Read 工具加 "pages":""），逐片透传后下游会看到污染后的入参。统一在
+// closeCurrentBlock 时整段清洗后一次性下发。
 func (t *anthropicStreamTranslator) handleToolInputDelta(data []byte) []anthropicStreamEvent {
 	delta := gjson.GetBytes(data, "delta").String()
 	if delta == "" {
 		return nil
 	}
-
-	idx := t.contentBlockIndex - 1
-	return []anthropicStreamEvent{{
-		Type:  "content_block_delta",
-		Index: &idx,
-		Delta: &anthropicDelta{
-			Type:        "input_json_delta",
-			PartialJSON: delta,
-		},
-	}}
+	t.currentToolInputBuffer.WriteString(delta)
+	return nil
 }
 
 // handleContentDone 处理内容完成（文本/推理块）
@@ -844,17 +848,70 @@ func (t *anthropicStreamTranslator) handleFailed() []anthropicStreamEvent {
 	return events
 }
 
-// closeCurrentBlock 关闭当前打开的 content block
+// closeCurrentBlock 关闭当前打开的 content block。
+// 关闭 tool_use 块时会先把累积的 arguments JSON 整段清洗（删除空字符串/null
+// 的可选字段），再作为单次 input_json_delta 下发。
 func (t *anthropicStreamTranslator) closeCurrentBlock() []anthropicStreamEvent {
 	if !t.contentBlockOpen {
 		return nil
 	}
 	t.contentBlockOpen = false
 	idx := t.contentBlockIndex - 1
-	return []anthropicStreamEvent{{
+
+	var events []anthropicStreamEvent
+	if t.currentBlockType == "tool_use" && t.currentToolInputBuffer.Len() > 0 {
+		cleaned := sanitizeToolInputJSON(t.currentToolInputBuffer.String())
+		if cleaned != "" {
+			events = append(events, anthropicStreamEvent{
+				Type:  "content_block_delta",
+				Index: &idx,
+				Delta: &anthropicDelta{
+					Type:        "input_json_delta",
+					PartialJSON: cleaned,
+				},
+			})
+		}
+		t.currentToolInputBuffer.Reset()
+	}
+
+	events = append(events, anthropicStreamEvent{
 		Type:  "content_block_stop",
 		Index: &idx,
-	}}
+	})
+	return events
+}
+
+// sanitizeToolInputJSON 清洗工具调用 arguments JSON：
+// 仅删除顶层值为空字符串("")或 null 的字段。
+// 不动空对象 {} / 空数组 []（部分工具语义上允许这两者）。
+// 上游 gpt-5.5 偶尔会给 Read 工具加 "pages":""，导致 claudecode 看到的入参
+// 带上无效空字段，模型在后续轮次里反复纠结"工具层带入了空 pages"。在代理
+// 层统一清掉，比让客户端去兼容更简单。
+func sanitizeToolInputJSON(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		return raw
+	}
+	changed := false
+	for k, v := range obj {
+		s := strings.TrimSpace(string(v))
+		if s == `""` || s == "null" {
+			delete(obj, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return raw
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return string(out)
 }
 
 // finalize 在流结束时补齐缺失的事件
@@ -886,6 +943,113 @@ func anthropicEventToSSE(evt anthropicStreamEvent) string {
 }
 
 // ==================== 非流式响应构建 ====================
+
+type anthropicResponseAccumulator struct {
+	response *anthropicResponse
+	content  []anthropicContentBlock
+}
+
+func newAnthropicResponseAccumulator(model string) *anthropicResponseAccumulator {
+	return &anthropicResponseAccumulator{
+		response: &anthropicResponse{
+			ID:      "msg_" + uuid.New().String()[:24],
+			Type:    "message",
+			Role:    "assistant",
+			Content: []anthropicContentBlock{},
+			Model:   model,
+		},
+	}
+}
+
+func (a *anthropicResponseAccumulator) apply(events []anthropicStreamEvent) {
+	for _, evt := range events {
+		switch evt.Type {
+		case "message_start":
+			if evt.Message != nil {
+				msg := *evt.Message
+				msg.Content = []anthropicContentBlock{}
+				a.response = &msg
+				a.content = a.content[:0]
+			}
+		case "content_block_start":
+			if evt.Index == nil || evt.ContentBlock == nil {
+				continue
+			}
+			a.ensureContentIndex(*evt.Index)
+			a.content[*evt.Index] = *evt.ContentBlock
+		case "content_block_delta":
+			if evt.Index == nil || evt.Delta == nil {
+				continue
+			}
+			a.ensureContentIndex(*evt.Index)
+			switch evt.Delta.Type {
+			case "text_delta":
+				a.content[*evt.Index].Text += evt.Delta.Text
+			case "thinking_delta":
+				a.content[*evt.Index].Thinking += evt.Delta.Thinking
+			case "input_json_delta":
+				a.content[*evt.Index].Input = json.RawMessage(evt.Delta.PartialJSON)
+			}
+		case "message_delta":
+			if evt.Delta != nil && evt.Delta.StopReason != "" {
+				a.response.StopReason = evt.Delta.StopReason
+			}
+			if evt.Usage != nil {
+				a.response.Usage = *evt.Usage
+			}
+		}
+	}
+}
+
+func (a *anthropicResponseAccumulator) ensureContentIndex(idx int) {
+	for len(a.content) <= idx {
+		a.content = append(a.content, anthropicContentBlock{})
+	}
+}
+
+func (a *anthropicResponseAccumulator) build(completedData []byte) *anthropicResponse {
+	fallback := buildAnthropicResponseFromCompleted(completedData, a.response.Model)
+	resp := *a.response
+	resp.Content = compactAnthropicContent(a.content)
+
+	if len(resp.Content) == 0 && len(fallback.Content) > 0 {
+		return fallback
+	}
+	if resp.StopReason == "" {
+		resp.StopReason = fallback.StopReason
+	}
+	if resp.StopReason == "" {
+		resp.StopReason = "end_turn"
+	}
+	if resp.Usage == (anthropicUsage{}) {
+		resp.Usage = fallback.Usage
+	}
+	return &resp
+}
+
+func compactAnthropicContent(content []anthropicContentBlock) []anthropicContentBlock {
+	out := make([]anthropicContentBlock, 0, len(content))
+	for _, block := range content {
+		switch block.Type {
+		case "text":
+			if block.Text == "" {
+				continue
+			}
+		case "thinking":
+			if block.Thinking == "" {
+				continue
+			}
+		case "tool_use":
+			if block.Input == nil || !json.Valid(block.Input) {
+				block.Input = json.RawMessage("{}")
+			}
+		default:
+			continue
+		}
+		out = append(out, block)
+	}
+	return out
+}
 
 // buildAnthropicResponseFromCompleted 从 response.completed 事件构建完整的 Anthropic 响应
 func buildAnthropicResponseFromCompleted(completedData []byte, model string) *anthropicResponse {
@@ -948,7 +1112,9 @@ func buildAnthropicResponseFromCompleted(completedData []byte, model string) *an
 			callID := fromCodexCallID(item.Get("call_id").String())
 			name := item.Get("name").String()
 			args := item.Get("arguments").String()
-			if args == "" {
+			if cleaned := sanitizeToolInputJSON(args); cleaned != "" {
+				args = cleaned
+			} else {
 				args = "{}"
 			}
 			content = append(content, anthropicContentBlock{

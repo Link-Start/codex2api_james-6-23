@@ -20,15 +20,15 @@ func newPremium5hTestAccount(plan string, resetAt time.Time) *Account {
 	}
 }
 
-func TestPremium5hRateLimitedAccountRemainsSchedulable(t *testing.T) {
+func TestPremium5hRateLimitedAccountIsFencedFromScheduling(t *testing.T) {
 	acc := newPremium5hTestAccount("plus", time.Now().Add(45*time.Minute))
 
 	snapshot := acc.GetSchedulerDebugSnapshot(4)
 	if got := acc.RuntimeStatus(); got != "rate_limited" {
 		t.Fatalf("RuntimeStatus() = %q, want rate_limited", got)
 	}
-	if !acc.IsAvailable() {
-		t.Fatal("IsAvailable() = false, want true for premium 5h rate limited account")
+	if acc.IsAvailable() {
+		t.Fatal("IsAvailable() = true, want false for premium 5h rate limited account")
 	}
 	if snapshot.HealthTier != string(HealthTierRisky) {
 		t.Fatalf("HealthTier = %q, want %q", snapshot.HealthTier, HealthTierRisky)
@@ -40,6 +40,9 @@ func TestPremium5hRateLimitedAccountRemainsSchedulable(t *testing.T) {
 
 func TestPremium5hRateLimitExpiresAndUsageProbeResumes(t *testing.T) {
 	acc := newPremium5hTestAccount("team", time.Now().Add(-time.Minute))
+	acc.Status = StatusCooldown
+	acc.CooldownReason = "rate_limited"
+	acc.CooldownUtil = time.Now().Add(-time.Minute)
 
 	snapshot := acc.GetSchedulerDebugSnapshot(4)
 	if got := acc.RuntimeStatus(); got != "active" {
@@ -67,6 +70,38 @@ func TestPremium5hRateLimitedSkipsUsageProbeBeforeReset(t *testing.T) {
 	}
 }
 
+func TestNormalizePlanTypeFoldsProliteIntoPro(t *testing.T) {
+	cases := map[string]string{
+		"prolite":   "pro",
+		"ProLite":   "pro",
+		" prolite ": "pro",
+		"pro_lite":  "pro",
+		"pro-lite":  "pro",
+		"pro":       "pro",
+		"plus":      "plus",
+		"free":      "free",
+		"":          "",
+	}
+	for input, want := range cases {
+		if got := NormalizePlanType(input); got != want {
+			t.Errorf("NormalizePlanType(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestProliteIsTreatedAsPremium5hPlan(t *testing.T) {
+	acc := newPremium5hTestAccount("prolite", time.Now().Add(30*time.Minute))
+	if !acc.IsPremium5hPlan() {
+		t.Fatal("prolite should be recognized as a premium 5h plan")
+	}
+	if !IsPlusOrHigherPlan("prolite") {
+		t.Fatal("prolite should qualify as plus-or-higher for image routing")
+	}
+	if got := defaultScoreBiasForPlan("prolite"); got != 50 {
+		t.Fatalf("defaultScoreBiasForPlan(prolite) = %d, want 50", got)
+	}
+}
+
 func TestCleanByRuntimeStatusSkipsPremium5hRateLimitedAccount(t *testing.T) {
 	acc := newPremium5hTestAccount("plus", time.Now().Add(20*time.Minute))
 	store := &Store{
@@ -78,5 +113,53 @@ func TestCleanByRuntimeStatusSkipsPremium5hRateLimitedAccount(t *testing.T) {
 	}
 	if store.AccountCount() != 1 {
 		t.Fatalf("AccountCount() = %d, want 1", store.AccountCount())
+	}
+}
+
+func TestCleanRateLimitedManualClearsAllRateLimitFlavors(t *testing.T) {
+	premium := newPremium5hTestAccount("plus", time.Now().Add(20*time.Minute))
+	premium.DBID = 1
+
+	// Free 7d 用尽 → RuntimeStatus = "usage_exhausted"
+	exhausted := &Account{
+		DBID:                2,
+		AccessToken:         "token-exhausted",
+		PlanType:            "free",
+		Status:              StatusReady,
+		HealthTier:          HealthTierHealthy,
+		UsagePercent7d:      100,
+		UsagePercent7dValid: true,
+		Reset7dAt:           time.Now().Add(48 * time.Hour),
+		UsageUpdatedAt:      time.Now().Add(-1 * time.Minute),
+	}
+
+	// 普通正常账号 → 不应被清理
+	healthy := &Account{
+		DBID:        3,
+		AccessToken: "token-healthy",
+		PlanType:    "plus",
+		Status:      StatusReady,
+		HealthTier:  HealthTierHealthy,
+	}
+
+	// 锁定的限流账号 → 不应被清理
+	lockedRL := newPremium5hTestAccount("plus", time.Now().Add(20*time.Minute))
+	lockedRL.DBID = 4
+	lockedRL.Locked = 1
+
+	store := &Store{accounts: []*Account{premium, exhausted, healthy, lockedRL}}
+
+	cleaned := store.CleanRateLimitedManual(context.Background())
+	if cleaned != 2 {
+		t.Fatalf("CleanRateLimitedManual() cleaned = %d, want 2 (premium + exhausted)", cleaned)
+	}
+	if store.AccountCount() != 2 {
+		t.Fatalf("AccountCount() = %d, want 2 (healthy + locked stay)", store.AccountCount())
+	}
+	if store.FindByID(3) == nil {
+		t.Fatal("healthy account should remain")
+	}
+	if store.FindByID(4) == nil {
+		t.Fatal("locked rate-limited account should remain")
 	}
 }
