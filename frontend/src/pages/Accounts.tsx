@@ -13,6 +13,7 @@ import {
 } from "../lib/accountProxyBinding";
 import Modal from "../components/Modal";
 import ChannelLogo from "../components/ChannelLogo";
+import { useVisibleChannels } from "../visibleChannels";
 import ModelLogo from "../components/ModelLogo";
 import OperationResultsModal from "../components/OperationResultsModal";
 import { cn } from "@/lib/utils";
@@ -1661,6 +1662,11 @@ export default function Accounts() {
       : normalizedPath.endsWith("/accounts/claude")
         ? "claude"
         : "codex";
+  const { channels: visibleChannels, isChannelVisible } = useVisibleChannels();
+  // 设置页隐藏了某个渠道后，直接打开它的账号路由要回落到 Codex 视图。
+  useEffect(() => {
+    if (!isChannelVisible(providerView)) navigate("/accounts", { replace: true });
+  }, [isChannelVisible, navigate, providerView]);
   const setProviderView = useCallback(
     (view: UpstreamChannel) => {
       navigate(
@@ -5866,23 +5872,32 @@ export default function Accounts() {
   // 四个账号视图共用同一切换器（独立页面通过 headerSlot 注入）。
   // 滑块动画 + 品牌 logo，与仪表盘渠道过滤器视觉一致。
   // useMemo 保持引用稳定,否则每轮渲染的新元素会击穿独立账号页的 memo 边界。
-  const providerSwitcher = useMemo(() => (
-    <div className="relative grid w-full max-w-[560px] grid-cols-4 items-center rounded-lg border border-border bg-muted/40 p-0.5">
-      <span
-        aria-hidden
-        className="absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/4)] rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
-        style={{
-          transform: `translateX(${providerView === "grok" ? 100 : providerView === "antigravity" ? 200 : providerView === "claude" ? 300 : 0}%)`,
-        }}
-      />
-      {(
+  const providerSwitcherOptions = useMemo(
+    () =>
+      (
         [
           ["codex", t("accounts.providerViewCodex")],
           ["grok", t("accounts.providerViewGrok")],
           ["antigravity", t("accounts.providerViewAntigravity")],
           ["claude", t("accounts.providerViewClaude")],
         ] as const
-      ).map(([key, label]) => (
+      ).filter(([key]) => visibleChannels.includes(key)),
+    [t, visibleChannels],
+  );
+  const providerSwitcher = useMemo(() => (
+    <div
+      className="relative grid w-full max-w-[560px] items-center rounded-lg border border-border bg-muted/40 p-0.5"
+      style={{ gridTemplateColumns: `repeat(${providerSwitcherOptions.length}, minmax(0, 1fr))` }}
+    >
+      <span
+        aria-hidden
+        className="absolute inset-y-0.5 left-0.5 rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
+        style={{
+          width: `calc((100% - 4px) / ${providerSwitcherOptions.length})`,
+          transform: `translateX(${Math.max(0, providerSwitcherOptions.findIndex(([key]) => key === providerView)) * 100}%)`,
+        }}
+      />
+      {providerSwitcherOptions.map(([key, label]) => (
         <button
           key={key}
           type="button"
@@ -5900,7 +5915,7 @@ export default function Accounts() {
         </button>
       ))}
     </div>
-  ), [providerView, setProviderView, t]);
+  ), [providerView, setProviderView, t, providerSwitcherOptions]);
 
   if (providerView === "grok") {
     // key 触发渠道切换时整块内容淡入过渡，切换器由 headerSlot 常驻不闪。
