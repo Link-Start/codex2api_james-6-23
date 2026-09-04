@@ -6677,7 +6677,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				if fallback == nil {
 					return nil, "", SessionAffinityGuard{}
 				}
-				log.Printf("会话粘性容量溢出: key=%s 绑定账号=%d 并发满,本请求借用账号=%d(该请求预期上游缓存未命中)", key, binding.accountID, fallback.DBID)
+				log.Printf("会话粘性容量溢出: 绑定账号=%d 并发满,本请求借用账号=%d(该请求预期上游缓存未命中)", binding.accountID, fallback.DBID)
 				return fallback, "", SessionAffinityGuard{preserveAccountID: binding.accountID}
 			}
 		}
@@ -6716,7 +6716,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				if fallback == nil {
 					return nil, "", SessionAffinityGuard{}
 				}
-				log.Printf("会话粘性容量溢出: key=%s 绑定账号=%d 并发满,本请求借用账号=%d(该请求预期上游缓存未命中)", key, binding.accountID, fallback.DBID)
+				log.Printf("会话粘性容量溢出: 绑定账号=%d 并发满,本请求借用账号=%d(该请求预期上游缓存未命中)", binding.accountID, fallback.DBID)
 				return fallback, "", SessionAffinityGuard{preserveAccountID: binding.accountID}
 			}
 		}

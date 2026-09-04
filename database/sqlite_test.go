@@ -3575,11 +3575,11 @@ func TestAccountUsageAggregatesExcludeTransportRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAccountRequestCounts: %v", err)
 	}
-	if got := requestCounts[1]; got == nil || got.SuccessCount != 2 || got.ErrorCount != 1 || got.RetryErrorCount != 1 {
-		t.Fatalf("global request counts account 1 = %+v, want success=2 error=1 retry_error=1", got)
+	if got := requestCounts[1]; got == nil || got.SuccessCount != 2 || got.ErrorCount != 0 || got.RetryErrorCount != 1 {
+		t.Fatalf("global request counts account 1 = %+v, want success=2 error=0 retry_error=1", got)
 	}
-	if got := requestCounts[1]; got.ErrorStatusCounts[499] != 1 || got.ErrorStatusCounts[502] != 0 {
-		t.Fatalf("global error status counts = %#v, want 499=1 and no retry 502", got.ErrorStatusCounts)
+	if got := requestCounts[1]; got.ErrorStatusCounts[499] != 0 || got.ErrorStatusCounts[502] != 0 {
+		t.Fatalf("global error status counts = %#v, want no cancelled 499 or retry 502", got.ErrorStatusCounts)
 	}
 	if got := requestCounts[1]; got.SuccessModelCounts["gpt-5.4"] != 1 || got.SuccessModelCounts["gpt-5.2"] != 1 {
 		t.Fatalf("global success model counts = %#v, want gpt-5.4=1 gpt-5.2=1", got.SuccessModelCounts)
@@ -3588,11 +3588,11 @@ func TestAccountUsageAggregatesExcludeTransportRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAccountRequestCountsByIDs: %v", err)
 	}
-	if got := requestCountsByID[1]; got == nil || got.SuccessCount != 2 || got.ErrorCount != 1 || got.RetryErrorCount != 1 {
-		t.Fatalf("scoped request counts account 1 = %+v, want success=2 error=1 retry_error=1", got)
+	if got := requestCountsByID[1]; got == nil || got.SuccessCount != 2 || got.ErrorCount != 0 || got.RetryErrorCount != 1 {
+		t.Fatalf("scoped request counts account 1 = %+v, want success=2 error=0 retry_error=1", got)
 	}
-	if got := requestCountsByID[1]; got.ErrorStatusCounts[499] != 1 || got.ErrorStatusCounts[502] != 0 {
-		t.Fatalf("scoped error status counts = %#v, want 499=1 and no retry 502", got.ErrorStatusCounts)
+	if got := requestCountsByID[1]; got.ErrorStatusCounts[499] != 0 || got.ErrorStatusCounts[502] != 0 {
+		t.Fatalf("scoped error status counts = %#v, want no cancelled 499 or retry 502", got.ErrorStatusCounts)
 	}
 	if got := requestCountsByID[1]; got.SuccessModelCounts["gpt-5.4"] != 1 || got.SuccessModelCounts["gpt-5.2"] != 1 {
 		t.Fatalf("scoped success model counts = %#v, want gpt-5.4=1 gpt-5.2=1", got.SuccessModelCounts)

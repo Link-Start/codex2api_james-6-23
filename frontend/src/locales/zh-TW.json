@@ -235,7 +235,7 @@
     "claudeAllowSafetyIdentifier": "允許 safety_identifier",
     "claudeAllowSafetyIdentifierDesc": "允許把安全標識透傳給上游；預設關閉以減少隱私暴露。",
     "claudeAllowedBetaHeaders": "額外允許的 Beta Header",
-    "claudeAllowedBetaHeadersDesc": "逗號分隔；OAuth 必需 Header 始終保留，未列出的客戶端 Beta 預設丟棄。",
+    "claudeAllowedBetaHeadersDesc": "逗號分隔；真實 Claude Code CLI 的 Beta 與 OAuth 必需 Beta 始終放行，此處僅用於額外放行其它客戶端 Beta，未列出的仍丟棄。",
     "claudeMaxOutputTokens": "最大輸出 Token",
     "claudeUnlimitedPlaceholder": "0 = 不限制（以上游模型能力為準）",
     "claudeMaxOutputTokensDesc": "0 表示不設閘道上限；非 0 為單次請求上限，最終仍受上游模型限制。",
@@ -1142,6 +1142,11 @@
     }
   },
   "usage": {
+    "tableCached": "快取",
+    "cacheReadTooltip": "讀取快取：{{tokens}}",
+    "cacheCreateTooltip": "建立快取：{{tokens}}（5 分鐘 {{m5}} · 1 小時 {{h1}}）",
+    "claudeInputTooltip": "未快取輸入：{{input}}；總輸入：{{total}}（含讀取快取 {{read}}、建立快取 {{write}}）",
+    "totalInputTokens": "總輸入（含快取）",
     "cyberPolicyViewContent": "查看 cyber_policy 事件詳細資料",
     "cyberPolicyDetailTitle": "cyber_policy 觸發詳細資料",
     "cyberPolicyRequestContent": "關聯 Prompt",
