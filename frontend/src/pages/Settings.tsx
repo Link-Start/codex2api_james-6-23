@@ -141,7 +141,7 @@ const RESPONSE_CACHE_BUDGET_KEYS = [
 const DEFAULT_CODEX_UA_CONFIG: Required<CodexUserAgentConfig> = {
   raw_user_agent: '',
   client_name: 'codex-tui',
-  client_version: '0.144.1',
+  client_version: '0.153.3',
   os_name: 'Mac OS',
   os_version: '15.5.0',
   arch: 'arm64',
@@ -1845,7 +1845,7 @@ export default function Settings() {
     prompt_filter_review_timeout_seconds: 10,
     prompt_filter_review_fail_closed: true,
     client_compat_mode: 'preserve',
-    codex_min_cli_version: '0.144.1',
+    codex_min_cli_version: '0.153.3',
     codex_cli_version_sync_enabled: true,
     codex_cli_version_sync_interval_hours: 12,
     codex_user_agent_config: '{}',
@@ -1904,6 +1904,8 @@ export default function Settings() {
   // GitHub token 只写不回显：草稿态独立于 settingsForm，提交后清空（issue #522）
   const [githubTokenDraft, setGithubTokenDraft] = useState('')
   const [syncedCliVersion, setSyncedCliVersion] = useState('')
+  // 实际用于出站 UA 的版本(内置与同步取大);「设为同步版本」按钮以它为准,同步值过期/为空时不会把门槛设低
+  const [effectiveCliVersion, setEffectiveCliVersion] = useState('')
   const logoFileInputRef = useRef<HTMLInputElement>(null)
   const backgroundFileInputRef = useRef<HTMLInputElement>(null)
   const persistedBrandingRef = useRef<Partial<SiteBranding> | null>(null)
@@ -2188,6 +2190,7 @@ export default function Settings() {
     applyBranding(branding)
     setLoadedAdminSecret(settings.admin_secret ?? '')
     setSyncedCliVersion(settings.codex_synced_cli_version ?? '')
+    setEffectiveCliVersion(settings.codex_effective_cli_version ?? '')
     setModelList(modelsResp.models ?? [])
     setModelItems(modelsResp.items ?? [])
     setModelsLastSyncedAt(modelsResp.last_synced_at)
@@ -2363,6 +2366,7 @@ export default function Settings() {
     try {
       const result = await api.syncCodexCLIVersion()
       setSyncedCliVersion(result.effective_version)
+      setEffectiveCliVersion(result.effective_version)
       showToast(t('settings.cliVersionSyncSuccess', {
         version: result.effective_version,
         fetched: result.fetched_version || '-',
@@ -2386,6 +2390,7 @@ export default function Settings() {
         added: result.added,
         updated: result.updated,
         skipped: result.skipped?.length ?? 0,
+        removed: result.removed?.length ?? 0,
       }))
     } catch (error) {
       showToast(`${t('settings.modelsSyncFailed')}: ${getErrorMessage(error)}`, 'error')
@@ -3364,10 +3369,24 @@ export default function Settings() {
                       />
                     </SettingField>
                     <SettingField label={t('settings.codexMinCliVersion')} description={t('settings.codexMinCliVersionDesc')}>
-                      <Input
-                        value={settingsForm.codex_min_cli_version}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
-                      />
+                      <div className="flex items-center gap-2">
+                        <Input
+                          className="min-w-0 flex-1"
+                          value={settingsForm.codex_min_cli_version}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
+                        />
+                        {/* 一键把阈值对齐到当前同步到的 CLI 版本；只改表单值,随「保存设置」落库 */}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="shrink-0"
+                          disabled={!effectiveCliVersion || settingsForm.codex_min_cli_version.trim() === effectiveCliVersion}
+                          title={effectiveCliVersion ? t('settings.codexMinCliVersionUseSyncedDesc', { version: effectiveCliVersion }) : t('settings.codexMinCliVersionNoSynced')}
+                          onClick={() => setSettingsForm(f => ({ ...f, codex_min_cli_version: effectiveCliVersion }))}
+                        >
+                          {t('settings.codexMinCliVersionUseSynced')}
+                        </Button>
+                      </div>
                     </SettingField>
                     <SettingField label={t('settings.codexCliVersionSync')} description={t('settings.codexCliVersionSyncDesc')}>
                       <div className="flex items-center gap-2">
@@ -3462,7 +3481,7 @@ export default function Settings() {
                       <Input
                         className="font-mono text-xs"
                         value={codexUserAgentConfig.raw_user_agent ?? ''}
-                        placeholder="codex-tui/0.144.1 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.144.1)"
+                        placeholder="codex-tui/0.153.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.153.3)"
                         onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ raw_user_agent: e.target.value })}
                         onBlur={saveCodexUserAgentConfig}
                       />

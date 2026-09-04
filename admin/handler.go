@@ -8952,24 +8952,27 @@ type settingsResponse struct {
 	CodexCLIVersionSyncEnabled          bool   `json:"codex_cli_version_sync_enabled"`
 	CodexCLIVersionSyncIntervalHours    int    `json:"codex_cli_version_sync_interval_hours"`
 	CodexSyncedCLIVersion               string `json:"codex_synced_cli_version"`
-	SchedulerMode                       string `json:"scheduler_mode"`
-	AffinityMode                        string `json:"affinity_mode"`
-	SessionAffinitySpread               bool   `json:"session_affinity_spread"`
-	SessionSlotBufferEnabled            bool   `json:"session_slot_buffer_enabled"`
-	SessionSlotBufferSeconds            int    `json:"session_slot_buffer_seconds"`
-	GrokAffinityMode                    string `json:"grok_affinity_mode"`
-	GrokProbeEnabled                    bool   `json:"grok_probe_enabled"`
-	GrokProbeIntervalMinutes            int    `json:"grok_probe_interval_minutes"`
-	GrokMaxRateLimitRetries             int    `json:"grok_max_rate_limit_retries"`
-	GrokFollowUpEffortEnabled           bool   `json:"grok_follow_up_effort_enabled"`
-	GrokFollowUpToolEffort              string `json:"grok_follow_up_tool_effort"`
-	GrokFollowUpSmallEffort             string `json:"grok_follow_up_small_effort"`
-	GrokQualityGuardEnabled             bool   `json:"grok_quality_guard_enabled"`
-	GrokQualityGuardMaxAttempts         int    `json:"grok_quality_guard_max_attempts"`
-	GrokQualityGuardHoldTimeoutSec      int    `json:"grok_quality_guard_hold_timeout_sec"`
-	GrokQualityGuardOnExhausted         string `json:"grok_quality_guard_on_exhausted"`
-	GrokQualityGuardCooldownHours       int    `json:"grok_quality_guard_account_cooldown_hours"`
-	GrokOAuthClientID                   string `json:"grok_oauth_client_id"`
+	// CodexEffectiveCLIVersion 是当前实际用于出站 UA 的版本(内置常量与同步值取大),
+	// 供设置页"设为同步版本"按钮使用——同步值可能过期或为空,内置值才是下限。
+	CodexEffectiveCLIVersion       string `json:"codex_effective_cli_version"`
+	SchedulerMode                  string `json:"scheduler_mode"`
+	AffinityMode                   string `json:"affinity_mode"`
+	SessionAffinitySpread          bool   `json:"session_affinity_spread"`
+	SessionSlotBufferEnabled       bool   `json:"session_slot_buffer_enabled"`
+	SessionSlotBufferSeconds       int    `json:"session_slot_buffer_seconds"`
+	GrokAffinityMode               string `json:"grok_affinity_mode"`
+	GrokProbeEnabled               bool   `json:"grok_probe_enabled"`
+	GrokProbeIntervalMinutes       int    `json:"grok_probe_interval_minutes"`
+	GrokMaxRateLimitRetries        int    `json:"grok_max_rate_limit_retries"`
+	GrokFollowUpEffortEnabled      bool   `json:"grok_follow_up_effort_enabled"`
+	GrokFollowUpToolEffort         string `json:"grok_follow_up_tool_effort"`
+	GrokFollowUpSmallEffort        string `json:"grok_follow_up_small_effort"`
+	GrokQualityGuardEnabled        bool   `json:"grok_quality_guard_enabled"`
+	GrokQualityGuardMaxAttempts    int    `json:"grok_quality_guard_max_attempts"`
+	GrokQualityGuardHoldTimeoutSec int    `json:"grok_quality_guard_hold_timeout_sec"`
+	GrokQualityGuardOnExhausted    string `json:"grok_quality_guard_on_exhausted"`
+	GrokQualityGuardCooldownHours  int    `json:"grok_quality_guard_account_cooldown_hours"`
+	GrokOAuthClientID              string `json:"grok_oauth_client_id"`
 	// GrokOAuthClientIDEnvOverride 为 true 时，环境变量 GROK_OAUTH_CLIENT_ID 正压着上面这个设置，
 	// 前端据此提示「当前以环境变量为准」。GrokOAuthClientIDEffective 是实际生效值。
 	GrokOAuthClientIDEnvOverride bool   `json:"grok_oauth_client_id_env_override"`
@@ -9953,6 +9956,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexCLIVersionSyncEnabled:          h.store.CodexCLIVersionSyncEnabled(),
 		CodexCLIVersionSyncIntervalHours:    h.store.CodexCLIVersionSyncIntervalHours(),
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
+		CodexEffectiveCLIVersion:            proxy.LatestCodexCLIVersionForHeaders(),
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
@@ -11751,6 +11755,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexCLIVersionSyncEnabled:          h.store.CodexCLIVersionSyncEnabled(),
 		CodexCLIVersionSyncIntervalHours:    h.store.CodexCLIVersionSyncIntervalHours(),
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
+		CodexEffectiveCLIVersion:            proxy.LatestCodexCLIVersionForHeaders(),
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
