@@ -2,6 +2,13 @@ export type ToastType = 'success' | 'error' | 'warning' | 'info'
 export type ISODateString = string
 export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'claude'
 
+// 管理台可见渠道设置（GET/PUT /settings/visible-channels）
+export interface VisibleChannelsSettings {
+  channels: UpstreamChannel[]
+  all: UpstreamChannel[]
+  fallback: UpstreamChannel
+}
+
 /** Claude Code OAuth：第一步返回授权 URL 与 state。 */
 export interface ClaudeAuthURLResponse {
   auth_url: string

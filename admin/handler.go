@@ -1193,6 +1193,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/settings/observed-instructions", h.GetObservedInstructions)
 	api.GET("/settings/invite-guide", h.GetInviteGuideSettings)
 	api.PUT("/settings/invite-guide", h.UpdateInviteGuideSettings)
+	api.GET("/settings/visible-channels", h.GetVisibleChannelsSettings)
+	api.PUT("/settings/visible-channels", h.UpdateVisibleChannelsSettings)
 	api.POST("/settings/background-upload", h.UploadBackgroundAsset)
 	api.POST("/settings/image-storage/test", h.TestImageStorageConnection)
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)

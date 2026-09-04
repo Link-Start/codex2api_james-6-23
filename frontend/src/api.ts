@@ -135,6 +135,7 @@ import type {
   UpdateAccountGroupRequest,
   UpstreamChannel,
   ClaudeGlobalConfig,
+  VisibleChannelsSettings,
 } from './types'
 
 const BASE = '/api/admin'
@@ -950,6 +951,12 @@ export const api = {
     request<{ queued: number; skipped: number }>('/accounts/invite/plan/probe', {
       method: 'POST',
       body: JSON.stringify({ ids }),
+    }),
+  getVisibleChannels: () => request<VisibleChannelsSettings>('/settings/visible-channels'),
+  updateVisibleChannels: (channels: readonly UpstreamChannel[]) =>
+    request<VisibleChannelsSettings>('/settings/visible-channels', {
+      method: 'PUT',
+      body: JSON.stringify({ channels }),
     }),
   getInviteGuideSettings: () => request<{ enabled: boolean }>('/settings/invite-guide'),
   updateInviteGuideSettings: (enabled: boolean) =>
