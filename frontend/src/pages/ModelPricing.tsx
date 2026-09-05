@@ -1390,6 +1390,9 @@ export default function ModelPricing() {
                 const inputVal = normalizePrice(draft.input)
                 const outputVal = normalizePrice(draft.output)
                 const multiplier = getOutputMultiplier(inputVal, outputVal)
+                const advancedFields = r.model === 'gpt-6-astra'
+                  ? ADVANCED_FIELDS.filter((field) => !field.key.includes('_long'))
+                  : ADVANCED_FIELDS
                 const hasLongContextPricing =
                   normalizePrice(draft.long_context_threshold_tokens) > 0 ||
                   normalizePrice(draft.input_long) > 0 ||
@@ -1559,7 +1562,7 @@ export default function ModelPricing() {
                         >
                           <div className="min-h-0 overflow-hidden">
                             <div className="grid grid-cols-1 gap-2.5 pt-2 min-[480px]:grid-cols-2 xl:grid-cols-4">
-                              {ADVANCED_FIELDS.map((field) => (
+                              {advancedFields.map((field) => (
                                 <PriceField
                                   key={field.key}
                                   field={field}
