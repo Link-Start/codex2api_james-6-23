@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -27,14 +26,17 @@ const (
 
 type encryptedDigest = [sha256.Size]byte
 
-// encryptedScopeKey namespaces remembered rejections. keyIdentity is the
-// downstream API key's stable non-secret identity and is deliberately kept as
-// a plain field rather than folded into the digest: the credential must never
-// be an input to a general-purpose hash. scope digests the remaining
-// owner/account/generation/session dimensions.
+// encryptedScopeKey namespaces remembered rejections. Only the raw downstream
+// session ID is digested; the other dimensions are plain, non-secret values
+// (the API key's stable identity is the same derivation used for
+// prompt_cache_key) and are deliberately kept out of the hash so that nothing
+// credential-related ever feeds a general-purpose hash.
 type encryptedScopeKey struct {
+	owner       int64
 	keyIdentity string
-	scope       encryptedDigest
+	account     int64
+	generation  int64
+	session     encryptedDigest
 }
 
 type encryptedMemoryEntry struct {
@@ -205,12 +207,14 @@ func prepareEncryptedContentAttempt(ctx context.Context, account *auth.Account, 
 		owner = identity.APIKeyID
 	}
 	// Static API keys have no database ID. Namespace them by the key's stable
-	// non-secret identity (the same derivation used for prompt_cache_key),
-	// carried as a plain field so the credential never feeds a hash; neither
-	// credentials nor raw conversation IDs are kept.
+	// non-secret identity too; neither credentials nor raw conversation IDs
+	// are kept.
 	key := encryptedScopeKey{
+		owner:       owner,
 		keyIdentity: deterministicPromptCacheKey(strings.TrimPrefix(strings.TrimSpace(headers.Get("Authorization")), "Bearer "), nil),
-		scope:       sha256.Sum256([]byte(fmt.Sprintf("%d\x00%d\x00%d\x00%s", owner, account.ID(), account.GetCredentialGeneration(), session))),
+		account:     account.ID(),
+		generation:  account.GetCredentialGeneration(),
+		session:     sha256.Sum256([]byte(session)),
 	}
 	a := &encryptedContentAttempt{memory: rejectedEncryptedContent, key: key}
 	return stripRememberedEncryptedContent(body, a.memory.get(key)), a
