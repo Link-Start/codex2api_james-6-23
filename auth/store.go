@@ -90,8 +90,12 @@ func NormalizeTestContent(content string) string {
 
 // Account 运行时账号状态
 type Account struct {
-	mu          sync.RWMutex
-	usageSyncMu sync.Mutex
+	codexLiteSupport          map[string]bool
+	codexCapabilityGeneration int64
+	codexCapabilityObservedAt int64
+	UpstreamRequestIDHeader   string
+	mu                        sync.RWMutex
+	usageSyncMu               sync.Mutex
 	// grokRuntimeFactsMu serializes inference-response observations for this
 	// account. The sink performs generation-fenced database writes before it
 	// publishes any hard gate or routing invalidation back to memory.
@@ -3185,6 +3189,7 @@ func (a *Account) GetLastUsedAt() time.Time {
 
 // Store 多账号管理器（数据库 + Token 缓存）
 type Store struct {
+	proxyAuditLabels                   map[string]ProxyAuditLabel
 	mu                                 sync.RWMutex
 	accountMutationMu                  sync.Mutex // serializes account-set and scheduler mutations without nesting their locks
 	accounts                           []*Account
@@ -3968,7 +3973,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.smartPacingWindows = normalizeSmartPacingWindows(settings.SmartPacingWindows)
 
 	// 加载代理池（含全部托管 URL，供禁用后 fail-closed 识别）
-	if settings.ProxyPoolEnabled && s.proxyPoolLoader != nil {
+	if s.proxyPoolLoader != nil {
 		if err := s.ReloadProxyPool(); err != nil {
 			log.Printf("代理池加载失败: %v", err)
 		}
@@ -4730,17 +4735,29 @@ func (s *Store) ReloadProxyPool() error {
 	}
 	enabledURLs := collectProxyURLs(proxies)
 	managedURLs := enabledURLs
+	auditRows := proxies
 	if inventory := s.proxyInventoryLoader; inventory != nil {
 		allProxies, invErr := inventory(ctx)
 		if invErr != nil {
 			return invErr
 		}
 		managedURLs = collectProxyURLs(allProxies)
+		auditRows = allProxies
 	}
 	s.mu.Lock()
 	s.proxyPool = enabledURLs
 	s.proxyPoolSet = buildProxyPoolSet(enabledURLs)
 	s.managedProxySet = buildProxyPoolSet(managedURLs)
+	s.proxyAuditLabels = make(map[string]ProxyAuditLabel, len(auditRows))
+	for _, row := range auditRows {
+		if row != nil {
+			name := strings.TrimSpace(row.Label)
+			if name == "" {
+				name = "proxy"
+			}
+			s.proxyAuditLabels[row.URL] = ProxyAuditLabel{ID: row.ID, Name: name}
+		}
+	}
 	s.mu.Unlock()
 	log.Printf("代理池已重新加载: %d 个活跃代理", len(enabledURLs))
 	return nil
@@ -5164,6 +5181,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		SessionToken:                 st,
 		ProxyURL:                     strings.TrimSpace(row.ProxyURL),
 		CustomHeaders:                row.GetCredentialStringMap("custom_headers"),
+		UpstreamRequestIDHeader:      row.GetCredential(UpstreamRequestIDHeaderCredentialKey),
 		HealthTier:                   HealthTierWarm,
 		AddedAt:                      row.CreatedAt.UnixNano(),
 		UpstreamType:                 upstreamType,
@@ -5592,6 +5610,7 @@ func (s *Store) reconcileDispatchState(ctx context.Context) (bool, error) {
 			groupIDs := normalizeAllowedGroupIDs(memberships[row.ID])
 			allowedAPIKeyIDs := normalizeAllowedAPIKeyIDs(row.GetCredentialInt64Slice("allowed_api_key_ids"))
 			acc.mu.Lock()
+			acc.UpstreamRequestIDHeader = row.GetCredential(UpstreamRequestIDHeaderCredentialKey)
 			accountMetadataChanged := !int64SliceEqual(normalizeAllowedGroupIDs(acc.GroupIDs), groupIDs) ||
 				!int64SliceEqual(normalizeAllowedAPIKeyIDs(acc.AllowedAPIKeyIDs), allowedAPIKeyIDs)
 			if accountMetadataChanged {

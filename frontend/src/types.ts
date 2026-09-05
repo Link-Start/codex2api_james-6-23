@@ -172,6 +172,7 @@ export interface GrokPlanInfo {
 }
 
 export interface AccountRow {
+  upstream_request_id_header?: string | null
   detail_loaded?: boolean
   id: number
   name: string
@@ -1295,6 +1296,7 @@ export interface GrokBatchImportResponse {
 }
 
 export interface UpdateAccountSchedulerRequest {
+  upstream_request_id_header?: string | null
   score_bias_override?: number | null
   base_concurrency_override?: number | null
   skip_warm_tier?: boolean
@@ -1594,6 +1596,7 @@ export interface OpsOverviewResponse {
     max_bytes: number
     high_water_bytes: number
     largest_entry_bytes: number
+    shared_payload_bytes?: number
     local_hits: number
     local_misses: number
     remote_hits: number
@@ -3068,6 +3071,10 @@ export interface APIKeyAccountStatsResponse {
 }
 
 export interface UsageLog {
+  request_id?: string
+  upstream_request_id?: string
+  upstream_proxy_id?: number
+  upstream_proxy_name?: string
   id: number
   account_id: number
   // 上游渠道(codex/grok),写入时固化;历史行回填,可能为空
