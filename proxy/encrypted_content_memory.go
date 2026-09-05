@@ -26,8 +26,19 @@ const (
 )
 
 type encryptedDigest = [sha256.Size]byte
+
+// encryptedScopeKey namespaces remembered rejections. keyIdentity is the
+// downstream API key's stable non-secret identity and is deliberately kept as
+// a plain field rather than folded into the digest: the credential must never
+// be an input to a general-purpose hash. scope digests the remaining
+// owner/account/generation/session dimensions.
+type encryptedScopeKey struct {
+	keyIdentity string
+	scope       encryptedDigest
+}
+
 type encryptedMemoryEntry struct {
-	key     encryptedDigest
+	key     encryptedScopeKey
 	digests map[encryptedDigest]struct{}
 	expires time.Time
 }
@@ -36,14 +47,14 @@ type encryptedMemoryEntry struct {
 // and the rejecting account's credential generation, and are bounded by LRU/TTL.
 type encryptedContentMemory struct {
 	mu      sync.Mutex
-	entries map[encryptedDigest]*list.Element
+	entries map[encryptedScopeKey]*list.Element
 	lru     list.List
 	now     func() time.Time
 }
 
 var rejectedEncryptedContent = &encryptedContentMemory{now: time.Now}
 
-func (m *encryptedContentMemory) get(key encryptedDigest) map[encryptedDigest]struct{} {
+func (m *encryptedContentMemory) get(key encryptedScopeKey) map[encryptedDigest]struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e := m.entries[key]
@@ -64,14 +75,14 @@ func (m *encryptedContentMemory) get(key encryptedDigest) map[encryptedDigest]st
 	return copy
 }
 
-func (m *encryptedContentMemory) mark(key encryptedDigest, digests []encryptedDigest) {
+func (m *encryptedContentMemory) mark(key encryptedScopeKey, digests []encryptedDigest) {
 	if len(digests) == 0 {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.entries == nil {
-		m.entries = make(map[encryptedDigest]*list.Element)
+		m.entries = make(map[encryptedScopeKey]*list.Element)
 	}
 	now := m.now()
 	e := m.entries[key]
@@ -173,7 +184,7 @@ func stripRememberedEncryptedContent(body []byte, invalid map[encryptedDigest]st
 
 type encryptedContentAttempt struct {
 	memory *encryptedContentMemory
-	key    encryptedDigest
+	key    encryptedScopeKey
 }
 
 func prepareEncryptedContentAttempt(ctx context.Context, account *auth.Account, body []byte, session string, headers http.Header) ([]byte, *encryptedContentAttempt) {
@@ -193,12 +204,14 @@ func prepareEncryptedContentAttempt(ctx context.Context, account *auth.Account, 
 	if identity := PayloadRuleIdentityFromContext(ctx); identity != nil {
 		owner = identity.APIKeyID
 	}
-	// Static API keys have no database ID. Fold the key's stable non-secret
-	// identity (the same derivation used for prompt_cache_key) into the
-	// namespace instead of the raw credential; neither credentials nor raw
-	// conversation IDs are kept.
-	keyIdentity := deterministicPromptCacheKey(strings.TrimPrefix(strings.TrimSpace(headers.Get("Authorization")), "Bearer "), nil)
-	key := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%d\x00%d\x00%s", owner, keyIdentity, account.ID(), account.GetCredentialGeneration(), session)))
+	// Static API keys have no database ID. Namespace them by the key's stable
+	// non-secret identity (the same derivation used for prompt_cache_key),
+	// carried as a plain field so the credential never feeds a hash; neither
+	// credentials nor raw conversation IDs are kept.
+	key := encryptedScopeKey{
+		keyIdentity: deterministicPromptCacheKey(strings.TrimPrefix(strings.TrimSpace(headers.Get("Authorization")), "Bearer "), nil),
+		scope:       sha256.Sum256([]byte(fmt.Sprintf("%d\x00%d\x00%d\x00%s", owner, account.ID(), account.GetCredentialGeneration(), session))),
+	}
 	a := &encryptedContentAttempt{memory: rejectedEncryptedContent, key: key}
 	return stripRememberedEncryptedContent(body, a.memory.get(key)), a
 }

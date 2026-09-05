@@ -88,14 +88,14 @@ func TestEncryptedErrorObserverStreamingAndBounds(t *testing.T) {
 func TestEncryptedMemoryTTLAndCapacity(t *testing.T) {
 	now := time.Now()
 	m := &encryptedContentMemory{now: func() time.Time { return now }}
-	key, digest := sha256.Sum256([]byte("session")), sha256.Sum256([]byte("ciphertext"))
+	key, digest := encryptedScopeKey{scope: sha256.Sum256([]byte("session"))}, sha256.Sum256([]byte("ciphertext"))
 	m.mark(key, []encryptedDigest{digest})
 	now = now.Add(encryptedMemoryTTL)
 	if len(m.get(key)) != 0 {
 		t.Fatal("expired rejection retained")
 	}
 	for i := 0; i < encryptedMemoryMaxSessions+10; i++ {
-		m.mark(sha256.Sum256([]byte(fmt.Sprint(i))), []encryptedDigest{digest})
+		m.mark(encryptedScopeKey{scope: sha256.Sum256([]byte(fmt.Sprint(i)))}, []encryptedDigest{digest})
 	}
 	if len(m.entries) != encryptedMemoryMaxSessions {
 		t.Fatalf("session cap: %d", len(m.entries))
@@ -112,7 +112,7 @@ func TestEncryptedMemoryTTLAndCapacity(t *testing.T) {
 
 func TestEncryptedMemoryConcurrentAccess(t *testing.T) {
 	m := &encryptedContentMemory{now: time.Now}
-	key := sha256.Sum256([]byte("s"))
+	key := encryptedScopeKey{scope: sha256.Sum256([]byte("s"))}
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
