@@ -1301,7 +1301,24 @@ func HandleClaudeModelBillingRejection(store *auth.Store, account *auth.Account,
 	} else if removed {
 		log.Printf("[账号 %d] 上游 credits_required,已把模型 %s 从账号模型白名单移除", account.ID(), m)
 	}
+	// 套餐推断 hook:credits_required 说明当前套餐不含该模型,占位/Max 套餐降为 pro。
+	if previous, current, changed := store.ApplyClaudePlanFromCreditsRequired(dropCtx, account); changed {
+		log.Printf("[账号 %d] 上游 credits_required(模型 %s),套餐由 %q 推断为 %q", account.ID(), m, previous, current)
+	}
 	return true
+}
+
+// NoteClaudeGatedModelSuccess 是套餐推断 hook 的成功侧:高档模型(Fable)成功响应
+// 说明账号至少是 Max,占位/pro 套餐升为 max。非高档模型或非 Claude 账号直接返回。
+func NoteClaudeGatedModelSuccess(store *auth.Store, account *auth.Account, model string) {
+	if store == nil || account == nil || !account.IsClaudeOAuth() || !auth.IsClaudeCreditsGatedModel(model) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if previous, current, changed := store.ApplyClaudePlanFromGatedModelSuccess(ctx, account, model); changed {
+		log.Printf("[账号 %d] 高档模型 %s 调用成功,套餐由 %q 推断为 %q", account.ID(), model, previous, current)
+	}
 }
 
 // claudeGenericRateLimitBackoff 返回通用限流(非窗口耗尽)的短冷却时长:

@@ -205,7 +205,9 @@ func (h *Handler) probeUsageViaClaudeMessages(ctx context.Context, account *auth
 	// compatibility fallback for older tokens/proxies that do not expose it.
 	// Tests inject the Messages executor to provide a fully isolated upstream;
 	// skip the real OAuth request in that mode instead of reaching Anthropic.
-	if h != nil && h.executeClaudeUsageProbe == nil {
+	// Setup Token 只有 user:inference,usage 端点必 403;直接走 Messages 探针,
+	// 免得每轮采样都留一条无意义的 403 足迹。
+	if h != nil && h.executeClaudeUsageProbe == nil && !account.IsClaudeSetupToken() {
 		if windows, err := h.fetchClaudeOAuthUsage(ctx, account); err == nil && len(windows) > 0 {
 			oauthWindows = windows
 			h.applyClaudeOAuthUsage(account, windows)
@@ -285,6 +287,7 @@ func (h *Handler) probeUsageViaClaudeMessages(ctx context.Context, account *auth
 	}
 	if h != nil && h.store != nil {
 		h.store.ReportRequestSuccess(account, 0)
+		proxy.NoteClaudeGatedModelSuccess(h.store, account, model)
 	}
 	return nil
 }

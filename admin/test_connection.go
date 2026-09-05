@@ -506,6 +506,12 @@ func (h *Handler) handleClaudeConnectionTest(
 	} else {
 		h.store.RecordManualTestSuccess(account, time.Since(start))
 	}
+	// 显式复探成功:该模型此前的模型级冷却(如 credits_required)已不成立,立即解除,
+	// 调度器无需等 30 分钟窗口自然到期。
+	if account.IsModelRateLimited(testModel) {
+		h.store.ClearModelCooldown(account, testModel)
+	}
+	proxy.NoteClaudeGatedModelSuccess(h.store, account, testModel)
 	sendTestEvent(c, testEvent{Type: "test_complete", Success: true})
 }
 
@@ -854,9 +860,9 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 					}
 				}
 			}
-			if account.IsModelRateLimited(requested) {
-				return "", fmt.Errorf("该 Claude 模型当前不可用（模型级冷却）: %s", requested)
-			}
+			// 显式指定的模型不受模型级冷却(含 credits_required)阻拦:手工测试本身就是
+			// 操作者在主动复探(例如刚买了 credits / 想确认套餐),上游若仍拒绝会重新标记
+			// 冷却;若成功则由调用方清掉该模型的冷却。只有自动选模时才跳过冷却中的模型。
 			for _, model := range models {
 				if strings.EqualFold(strings.TrimSpace(model), requested) {
 					return strings.TrimSpace(model), nil
@@ -1401,6 +1407,7 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 			if status != "success" {
 				return "failed", msg
 			}
+			proxy.NoteClaudeGatedModelSuccess(h.store, acc, testModel)
 		} else if !acc.IsRelayStyle() {
 			usageState := proxy.SyncCodexUsageState(h.store, acc, resp)
 			applyUsageLimitedTestState(h.store, acc, usageState)

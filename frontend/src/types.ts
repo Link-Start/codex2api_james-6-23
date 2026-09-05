@@ -9,10 +9,36 @@ export interface VisibleChannelsSettings {
   fallback: UpstreamChannel
 }
 
+/** Claude 凭据形态:oauth=可刷新 OAuth;setup_token=长效 Setup Token(仅推理,1 年,无 RT)。 */
+export type ClaudeAuthKind = 'oauth' | 'setup_token'
+
 /** Claude Code OAuth：第一步返回授权 URL 与 state。 */
 export interface ClaudeAuthURLResponse {
   auth_url: string
   state: string
+  mode?: ClaudeAuthKind
+  redirect_uri?: string
+}
+
+/** Claude sessionKey(cookie)一键换号请求。 */
+export interface ClaudeSessionKeyExchangeRequest {
+  session_key: string
+  mode?: ClaudeAuthKind
+  name?: string
+  proxy_url?: string
+  use_proxy_pool?: boolean
+  timezone?: string
+}
+
+/** Claude Setup Token 批量粘贴导入请求。 */
+export interface ClaudeSetupTokenImportRequest {
+  text?: string
+  tokens?: string[]
+  name?: string
+  proxy_url?: string
+  use_proxy_pool?: boolean
+  timezone?: string
+  group_refs?: Array<{ name: string; channel: 'claude' }>
 }
 
 /** Claude Code OAuth：第二步用 state+code 换取 token 并入库。 */
@@ -28,7 +54,8 @@ export interface ClaudeExchangeCodeRequest {
 /** Claude Code：直接导入 cmd/claude_login 产出的 token JSON。 */
 export interface ClaudeImportTokenRequest {
   access_token: string
-  refresh_token: string
+  /** OAuth 凭据必填;Setup Token(auth_kind=setup_token)没有 RT。 */
+  refresh_token?: string
   email?: string
   account_id?: string
   expires_at?: string
@@ -43,7 +70,7 @@ export interface ClaudeImportTokenRequest {
 export interface ClaudeCredentialExportEntry extends ClaudeImportTokenRequest {
   type: 'claude'
   version: number
-  auth_kind: 'oauth'
+  auth_kind: ClaudeAuthKind
   plan_type?: string
   models?: string[]
   claude_fingerprint_mode?: 'preserve' | 'force' | ''
@@ -193,6 +220,8 @@ export interface AccountRow {
   grok_api?: boolean
   antigravity_api?: boolean
   claude_api?: boolean
+  /** Claude 凭据形态(仅 Claude 账号有值)。 */
+  claude_auth_kind?: ClaudeAuthKind | string
   antigravity_auth_kind?: 'oauth' | 'api_key' | string
   agent_identity?: boolean
   grok_auth_kind?: string
@@ -368,6 +397,8 @@ export interface AccountListSummary {
   risky: number
   oauth: number
   api_key: number
+  /** Claude 渠道:长效 Setup Token 账号数。 */
+  setup_token?: number
   subscription_unlocked: number
   unauthorized_24h: number
   rate_limited_1h: number
