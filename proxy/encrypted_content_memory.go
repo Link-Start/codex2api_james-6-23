@@ -193,9 +193,12 @@ func prepareEncryptedContentAttempt(ctx context.Context, account *auth.Account, 
 	if identity := PayloadRuleIdentityFromContext(ctx); identity != nil {
 		owner = identity.APIKeyID
 	}
-	// Static API keys have no database ID. Hash their authorization value into
-	// the namespace too; neither credentials nor raw conversation IDs are kept.
-	key := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%d\x00%d\x00%s", owner, headers.Get("Authorization"), account.ID(), account.GetCredentialGeneration(), session)))
+	// Static API keys have no database ID. Fold the key's stable non-secret
+	// identity (the same derivation used for prompt_cache_key) into the
+	// namespace instead of the raw credential; neither credentials nor raw
+	// conversation IDs are kept.
+	keyIdentity := deterministicPromptCacheKey(strings.TrimPrefix(strings.TrimSpace(headers.Get("Authorization")), "Bearer "), nil)
+	key := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%d\x00%d\x00%s", owner, keyIdentity, account.ID(), account.GetCredentialGeneration(), session)))
 	a := &encryptedContentAttempt{memory: rejectedEncryptedContent, key: key}
 	return stripRememberedEncryptedContent(body, a.memory.get(key)), a
 }
