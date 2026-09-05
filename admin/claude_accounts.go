@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
@@ -278,6 +279,7 @@ func (h *Handler) ImportClaudeToken(c *gin.Context) {
 		}
 		created, createErr := h.createClaudeAccount(ctx, name, proxyURL, document.Timezone, td, "manual_claude_import", &claudeAccountImportOptions{
 			AuthKind:           document.AuthKind,
+			BaseURL:            document.BaseURL,
 			Models:             document.Models,
 			PlanType:           document.PlanType,
 			FingerprintMode:    document.ClaudeFingerprintMode,
@@ -362,7 +364,7 @@ func (h *Handler) RefreshClaudeModels(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "账号缺少 access_token,请先刷新或重新导入")
 		return
 	}
-	models, ferr := auth.NewClaudeAuth(h.resolveClaudeModelProxy(id, row.ProxyURL)).FetchModels(ctx, accessToken)
+	models, ferr := auth.NewClaudeAuth(h.resolveClaudeModelProxy(id, row.ProxyURL)).FetchModelsWithCredentials(ctx, accessToken, row.GetCredential(auth.ClaudeAuthKindCredentialKey), row.GetCredential(auth.ClaudeBaseURLCredentialKey))
 	if ferr != nil {
 		writeError(c, http.StatusBadGateway, "拉取可用模型失败: "+ferr.Error())
 		return
@@ -418,7 +420,7 @@ func (h *Handler) refreshAllClaudeModels(ctx context.Context) (refreshed, failed
 			failed++
 			continue
 		}
-		models, ferr := auth.NewClaudeAuth(h.resolveClaudeModelProxy(row.ID, row.ProxyURL)).FetchModels(ctx, accessToken)
+		models, ferr := auth.NewClaudeAuth(h.resolveClaudeModelProxy(row.ID, row.ProxyURL)).FetchModelsWithCredentials(ctx, accessToken, row.GetCredential(auth.ClaudeAuthKindCredentialKey), row.GetCredential(auth.ClaudeBaseURLCredentialKey))
 		if ferr != nil || len(models) == 0 {
 			failed++
 			continue
@@ -524,11 +526,28 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 		requestedKind = strings.TrimSpace(opts.AuthKind)
 	}
 	if !auth.IsValidClaudeAuthKind(requestedKind) {
-		return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: "claude_auth_kind must be oauth, setup_token, or empty"}
+		return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: "claude_auth_kind must be oauth, setup_token, api_key, or empty"}
 	}
 	authKind := auth.NormalizeClaudeAuthKind(requestedKind, refreshToken != "")
 	if authKind == auth.ClaudeAuthKindOAuth && refreshToken == "" {
 		return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: "OAuth 凭据缺少 refresh_token;长效令牌请以 setup_token 形态导入"}
+	}
+	baseURL := ""
+	if authKind == auth.ClaudeAuthKindAPIKey {
+		if accessToken == "" || strings.IndexFunc(accessToken, unicode.IsSpace) >= 0 {
+			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: "API Key 不能为空或含空白字符"}
+		}
+		if opts != nil {
+			baseURL = opts.BaseURL
+		}
+		var err error
+		baseURL, err = auth.NormalizeClaudeBaseURL(baseURL)
+		if err != nil {
+			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: err.Error()}
+		}
+		refreshToken = ""
+		td.RefreshToken = ""
+		td.ExpiresAt = time.Time{}
 	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL != "" {
@@ -583,25 +602,29 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 		name = "claude"
 	}
 
-	// 未显式指定时区时,回退到 ClaudeCode 全局默认(系统设置里配置)。
-	if strings.TrimSpace(timezone) == "" && h.store != nil {
-		timezone = h.store.ClaudeDefaultTimezone()
-	}
-	if err := validateAccountTimezone(timezone); err != nil {
-		return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: err.Error()}
-	}
-
-	// 生成稳定指纹(UA / x-app / x-stainless-*),存进 custom_headers 供请求期套用。
-	fingerprint := auth.GenerateClaudeFingerprint(timezone)
-	customHeaders := fingerprint.Headers()
-	if opts != nil && len(opts.FingerprintHeaders) > 0 {
-		normalized, err := normalizeClaudeFingerprintHeaders(opts.FingerprintHeaders)
-		if err != nil {
+	var customHeaders map[string]string
+	if authKind != auth.ClaudeAuthKindAPIKey {
+		// 未显式指定时区时,回退到 ClaudeCode 全局默认(系统设置里配置)。
+		if strings.TrimSpace(timezone) == "" && h.store != nil {
+			timezone = h.store.ClaudeDefaultTimezone()
+		}
+		if err := validateAccountTimezone(timezone); err != nil {
 			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: err.Error()}
 		}
-		for key, value := range normalized {
-			customHeaders[key] = value
+
+		// 生成稳定指纹(UA / x-app / x-stainless-*),存进 custom_headers 供请求期套用。
+		fingerprint := auth.GenerateClaudeFingerprint(timezone)
+		customHeaders = fingerprint.Headers()
+		if opts != nil && len(opts.FingerprintHeaders) > 0 {
+			normalized, err := normalizeClaudeFingerprintHeaders(opts.FingerprintHeaders)
+			if err != nil {
+				return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: err.Error()}
+			}
+			for key, value := range normalized {
+				customHeaders[key] = value
+			}
 		}
+
 	}
 
 	// 动态拉取该账号**真实可用**的模型(Anthropic /v1/models),存进 credentials.models;
@@ -617,7 +640,7 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 		// A large bundle should not serialize one upstream /v1/models request per
 		// account. Leave the catalog empty so the normal default Claude model set
 		// is used; operators can refresh the catalog explicitly after import.
-	} else if models, ferr := auth.NewClaudeAuth(proxyURL).FetchModels(ctx, td.AccessToken); ferr == nil && len(models) > 0 {
+	} else if models, ferr := auth.NewClaudeAuth(proxyURL).FetchModelsWithCredentials(ctx, accessToken, authKind, baseURL); ferr == nil && len(models) > 0 {
 		claudeModels = models
 	} else if ferr != nil {
 		log.Printf("拉取 Claude 账号可用模型失败(将用兜底集): %v", ferr)
@@ -646,6 +669,13 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 		"timezone":                       strings.TrimSpace(timezone),
 		auth.ClaudeAuthKindCredentialKey: authKind,
 	}
+	if authKind == auth.ClaudeAuthKindAPIKey {
+		credentials[auth.ClaudeBaseURLCredentialKey] = baseURL
+		delete(credentials, "expires_at")
+		delete(credentials, "custom_headers")
+		delete(credentials, "timezone")
+		fingerprintMode = ""
+	}
 	if fingerprintMode != "" {
 		credentials[auth.ClaudeFingerprintModeCredentialKey] = fingerprintMode
 	}
@@ -664,6 +694,11 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 		if accountUUID != "" && strings.EqualFold(strings.TrimSpace(row.GetCredential("account_id")), accountUUID) {
 			h.mergeDuplicateMu.Unlock()
 			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusConflict, Message: fmt.Sprintf("Claude 账号已存在 (id=%d)", row.ID)}
+		}
+		if authKind == auth.ClaudeAuthKindAPIKey && claudeAuthKindForRow(row, true) == auth.ClaudeAuthKindAPIKey &&
+			strings.TrimSpace(row.GetCredential("access_token")) == accessToken && strings.TrimRight(row.GetCredential(auth.ClaudeBaseURLCredentialKey), "/") == baseURL {
+			h.mergeDuplicateMu.Unlock()
+			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusConflict, Message: fmt.Sprintf("Claude API Key 账号已存在 (id=%d)", row.ID)}
 		}
 		// A refresh token is itself a stable credential identity. Check it even
 		// when the provider also supplied an account_id; providers may rotate or
@@ -699,6 +734,7 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 			PlanType:              planType,
 			ClaudeFingerprintMode: fingerprintMode,
 			ClaudeAuthKind:        authKind,
+			ClaudeBaseURL:         baseURL,
 			CustomHeaders:         customHeaders,
 			Models:                claudeModels,
 		})
@@ -732,7 +768,7 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 	h.db.InsertAccountEventAsync(id, "added", source)
 	// Keep Claude imports on the bounded warmup queue. ProbeUsageSnapshot routes
 	// this account to Anthropic Messages and never to WHAM/Responses.
-	if h.store != nil && shouldScheduleClaudeImportWarmup(opts) {
+	if h.store != nil && authKind != auth.ClaudeAuthKindAPIKey && shouldScheduleClaudeImportWarmup(opts) {
 		h.scheduleImportedAccountWarmup(h.store.FindByID(id), id, source)
 	}
 	return claudeAccountCreateResult{ID: id, Email: email, Warnings: warnings}, nil

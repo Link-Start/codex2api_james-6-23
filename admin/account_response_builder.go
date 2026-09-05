@@ -222,6 +222,7 @@ func (h *Handler) buildAccountResponse(
 		AntigravityAPI:               isAntigravityAccount,
 		ClaudeAPI:                    isClaudeAccount,
 		ClaudeAuthKind:               claudeAuthKindForRow(row, isClaudeAccount),
+		ClaudeBaseURL:                row.GetCredential(auth.ClaudeBaseURLCredentialKey),
 		AntigravityAuthKind:          antigravityAuthKind,
 		AgentIdentity:                isAgentIdentityCredentialRow(row),
 		GrokAuthKind:                 grokAuthKind,

@@ -135,9 +135,9 @@ type Account struct {
 	// ClaudeFingerprintMode 见 claude_fingerprint_mode.go:Claude Code 出站身份头
 	// 收敛模式(preserve/force;空=跟随全局默认)。
 	ClaudeFingerprintMode string
-	// ClaudeAuthKind 见 claude_auth_kind.go:Claude 凭据形态(oauth / setup_token;
-	// 空=按是否有 RT 推断)。
+	// ClaudeAuthKind 见 claude_auth_kind.go:Claude 凭据形态(oauth / setup_token / api_key)。
 	ClaudeAuthKind string
+	ClaudeBaseURL  string
 	// Claude Code platform/version policy overrides. Empty values inherit the
 	// corresponding global policy from Store.
 	ClaudeClientPlatformOverride string
@@ -2964,7 +2964,7 @@ func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 	defer a.mu.RUnlock()
 	now := time.Now()
 
-	if a.usageProbeInFlight || a.AccessToken == "" || a.Status == StatusError {
+	if a.usageProbeInFlight || a.AccessToken == "" || a.Status == StatusError || a.isClaudeAPIKeyLocked() {
 		return false
 	}
 	if a.isRelayStyleLocked() && !a.isClaudeOAuthLocked() {
@@ -5198,6 +5198,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		CodexFingerprintMode:         codexFingerprintMode,
 		ClaudeFingerprintMode:        claudeFingerprintMode,
 		ClaudeAuthKind:               claudeAuthKind,
+		ClaudeBaseURL:                row.GetCredential(ClaudeBaseURLCredentialKey),
 		ClaudeClientPlatformOverride: claudeClientPlatformOverride,
 		ClaudeVersionPolicyOverride:  claudeVersionPolicyOverride,
 		ClaudeClientVersionOverride:  claudeClientVersionOverride,
@@ -5365,6 +5366,11 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 				log.Printf("[账号 %d] 解析 expires_at 失败: %v", row.ID, err)
 			}
 		}
+	}
+	if account.isClaudeAPIKeyLocked() {
+		account.RefreshToken = ""
+		account.SessionToken = ""
+		account.ExpiresAt = time.Time{}
 	}
 	if subExp := row.GetCredential("subscription_expires_at"); subExp != "" {
 		if parsed, err := time.Parse(time.RFC3339, subExp); err == nil {

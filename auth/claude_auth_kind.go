@@ -2,12 +2,13 @@ package auth
 
 // Claude 账号的凭据形态(auth_kind)。
 //
-// 同一个 upstream_type=claude 账号现在允许两种凭据:
+// 同一个 upstream_type=claude 账号允许三种凭据:
 //   - oauth:完整 Claude Code OAuth,access_token + refresh_token,AT 临期自动续期;
 //   - setup_token:官方 `claude setup-token` 同款长效令牌(sk-ant-oat01-…),仅
 //     user:inference scope,有效期 1 年,没有 refresh_token,到期只能重新授权。
+//   - api_key:API 服务的长期密钥,配合 claude_base_url 使用,没有 RT 或过期时间。
 //
-// 形态写在 credentials.claude_auth_kind;历史账号没有该键,按「是否有 RT」推断,
+// 形态写在 credentials.claude_auth_kind;未声明时保留历史 OAuth 推断规则,
 // 因此旧数据不需要迁移。
 
 import (
@@ -21,7 +22,9 @@ const (
 	// ClaudeAuthKindOAuth 是可刷新的完整 OAuth 凭据。
 	ClaudeAuthKindOAuth = "oauth"
 	// ClaudeAuthKindSetupToken 是长效 Setup Token(无 RT)。
-	ClaudeAuthKindSetupToken = "setup_token"
+	ClaudeAuthKindSetupToken   = "setup_token"
+	ClaudeAuthKindAPIKey       = "api_key"
+	ClaudeBaseURLCredentialKey = "claude_base_url"
 	// ClaudeSetupTokenPrefix 是官方 Setup Token(亦即 OAuth access token)的固定前缀。
 	ClaudeSetupTokenPrefix = "sk-ant-oat01-"
 	// ClaudeRefreshTokenPrefix 是 OAuth refresh token 的固定前缀。裸 RT 不能直接推理,
@@ -34,7 +37,7 @@ const (
 // IsValidClaudeAuthKind 判断 auth_kind 取值是否合法(空值合法,表示按 RT 推断)。
 func IsValidClaudeAuthKind(raw string) bool {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", ClaudeAuthKindOAuth, ClaudeAuthKindSetupToken:
+	case "", ClaudeAuthKindOAuth, ClaudeAuthKindSetupToken, ClaudeAuthKindAPIKey:
 		return true
 	}
 	return false
@@ -50,6 +53,8 @@ func NormalizeClaudeAuthKind(raw string, hasRefreshToken bool) string {
 		return ClaudeAuthKindOAuth
 	case ClaudeAuthKindSetupToken:
 		return ClaudeAuthKindSetupToken
+	case ClaudeAuthKindAPIKey:
+		return ClaudeAuthKindAPIKey
 	}
 	_ = hasRefreshToken
 	return ClaudeAuthKindOAuth
@@ -59,7 +64,7 @@ func NormalizeClaudeAuthKind(raw string, hasRefreshToken bool) string {
 // 没有 RT、且 AT 形如官方 Setup Token(sk-ant-oat01-)时判为 setup_token。用于从
 // 数据库行还原运行时形态,让手工写库/旧版导入的长效令牌也能被正确识别。
 func InferClaudeAuthKind(raw, accessToken, refreshToken string) string {
-	if kind := strings.ToLower(strings.TrimSpace(raw)); kind == ClaudeAuthKindOAuth || kind == ClaudeAuthKindSetupToken {
+	if kind := strings.ToLower(strings.TrimSpace(raw)); kind == ClaudeAuthKindOAuth || kind == ClaudeAuthKindSetupToken || kind == ClaudeAuthKindAPIKey {
 		return kind
 	}
 	if strings.TrimSpace(refreshToken) == "" && LooksLikeClaudeSetupToken(accessToken) {
@@ -142,7 +147,31 @@ func (a *Account) IsClaudeSetupToken() bool {
 	return a.isClaudeSetupTokenLocked()
 }
 
-// EffectiveClaudeAuthKind 返回账号的凭据形态(oauth / setup_token);非 Claude 账号返回空。
+func (a *Account) isClaudeAPIKeyLocked() bool {
+	return a.isClaudeOAuthLocked() && InferClaudeAuthKind(a.ClaudeAuthKind, a.AccessToken, a.RefreshToken) == ClaudeAuthKindAPIKey
+}
+
+// IsClaudeAPIKey 判断账号是否使用独立 API 服务的密钥。
+func (a *Account) IsClaudeAPIKey() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.isClaudeAPIKeyLocked()
+}
+
+// GetClaudeBaseURL 返回 API Key 账号配置的服务地址。
+func (a *Account) GetClaudeBaseURL() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.ClaudeBaseURL
+}
+
+// EffectiveClaudeAuthKind 返回账号的凭据形态;非 Claude 账号返回空。
 func (a *Account) EffectiveClaudeAuthKind() string {
 	if a == nil {
 		return ""

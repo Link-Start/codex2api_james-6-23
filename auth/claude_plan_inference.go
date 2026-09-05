@@ -46,7 +46,7 @@ func claudePlanPinnedByProvider(plan string) bool {
 // ApplyClaudePlanFromCreditsRequired 在账号命中 credits_required 时把套餐降为 pro。
 // 返回 (原套餐, 新套餐, 是否改动)。非 Claude 账号或套餐已被 provider 钉住时不改动。
 func (s *Store) ApplyClaudePlanFromCreditsRequired(ctx context.Context, acc *Account) (previous, current string, changed bool) {
-	if s == nil || acc == nil || !acc.IsClaudeOAuth() {
+	if s == nil || acc == nil || !acc.IsClaudeOAuth() || acc.IsClaudeAPIKey() {
 		return "", "", false
 	}
 	previous = acc.GetPlanType()
@@ -62,7 +62,7 @@ func (s *Store) ApplyClaudePlanFromCreditsRequired(ctx context.Context, acc *Acc
 // ApplyClaudePlanFromGatedModelSuccess 在高档模型成功响应后把占位/pro 套餐升为 max。
 // 已是 max 系列(max/max-5x/max-20x)或 team/enterprise 等不改动。
 func (s *Store) ApplyClaudePlanFromGatedModelSuccess(ctx context.Context, acc *Account, model string) (previous, current string, changed bool) {
-	if s == nil || acc == nil || !acc.IsClaudeOAuth() || !IsClaudeCreditsGatedModel(model) {
+	if s == nil || acc == nil || !acc.IsClaudeOAuth() || acc.IsClaudeAPIKey() || !IsClaudeCreditsGatedModel(model) {
 		return "", "", false
 	}
 	previous = acc.GetPlanType()

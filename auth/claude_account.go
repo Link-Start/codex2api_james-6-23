@@ -41,7 +41,7 @@ func (a *Account) isClaudeOAuthLocked() bool {
 	return strings.EqualFold(strings.TrimSpace(a.UpstreamType), UpstreamClaude)
 }
 
-// IsClaudeOAuth 判断账号是否为 Claude Code OAuth 账号。
+// IsClaudeOAuth 是历史命名的 Claude 渠道判定,也包括 Setup Token 和 API Key。
 func (a *Account) IsClaudeOAuth() bool {
 	if a == nil {
 		return false
@@ -105,9 +105,13 @@ func (s *Store) refreshClaudeAccount(ctx context.Context, acc *Account, forceRef
 	lockedAccessToken := acc.AccessToken
 	cooldownActive := acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)
 	setupToken := acc.isClaudeSetupTokenLocked()
+	apiKey := acc.isClaudeAPIKeyLocked()
 	expiresAt := acc.ExpiresAt
 	acc.mu.RUnlock()
 
+	if apiKey {
+		return nil
+	}
 	if setupToken {
 		// Setup Token 是长效 AT,没有可刷新的 RT:未到期无需任何动作,到期只能重新授权。
 		if !expiresAt.IsZero() && time.Now().After(expiresAt) {

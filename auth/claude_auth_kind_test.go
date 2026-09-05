@@ -25,7 +25,7 @@ func TestNormalizeAndInferClaudeAuthKind(t *testing.T) {
 	if got := InferClaudeAuthKind("oauth", "sk-ant-oat01-abcdef", ""); got != ClaudeAuthKindOAuth {
 		t.Fatalf("explicit oauth must win over token shape, got %q", got)
 	}
-	if !IsValidClaudeAuthKind("") || !IsValidClaudeAuthKind("oauth") || !IsValidClaudeAuthKind("setup_token") || IsValidClaudeAuthKind("api_key") {
+	if !IsValidClaudeAuthKind("") || !IsValidClaudeAuthKind("oauth") || !IsValidClaudeAuthKind("setup_token") || !IsValidClaudeAuthKind("api_key") || IsValidClaudeAuthKind("invalid") {
 		t.Fatal("IsValidClaudeAuthKind vocabulary drifted")
 	}
 }

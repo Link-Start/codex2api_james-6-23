@@ -187,6 +187,9 @@ func ExecuteClaudeMessagesRequestWithPolicy(ctx context.Context, account *auth.A
 	if account == nil {
 		return nil, ErrNoAvailableAccount()
 	}
+	if account.IsClaudeAPIKey() {
+		return executeClaudeAPIKeyMessages(ctx, account, requestBody, proxyOverride, headers)
+	}
 
 	account.Mu().RLock()
 	accessToken := strings.TrimSpace(account.AccessToken)
@@ -1261,7 +1264,7 @@ const claudeCreditsRequiredCooldown = 30 * time.Minute
 // 只冷却被拒的那个模型(不动账号),已处理返回 true,调用方据此**跳过账号级用量/限流同步**。
 // 非该类错误返回 false,调用方继续走正常的 SyncClaudeUsageState。
 func HandleClaudeModelBillingRejection(store *auth.Store, account *auth.Account, model string, statusCode int, errBody []byte) bool {
-	if store == nil || account == nil || statusCode != http.StatusTooManyRequests || len(errBody) == 0 {
+	if store == nil || account == nil || account.IsClaudeAPIKey() || statusCode != http.StatusTooManyRequests || len(errBody) == 0 {
 		return false
 	}
 	code := strings.TrimSpace(gjson.GetBytes(errBody, "error.details.error_code").String())

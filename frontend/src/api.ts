@@ -768,12 +768,12 @@ export const api = {
       body: JSON.stringify(data),
       timeoutMs: 90_000,
     }),
-  // CLI 直导：吃 cmd/claude_login -out 产出的 token JSON。
+  // Claude 凭据导入：OAuth、Setup Token 或 Base URL + API Key。
   importClaudeToken: (data: ClaudeImportTokenRequest) =>
     request<ClaudeAddAccountResponse>('/accounts/claude/import', {
       method: 'POST',
       body: JSON.stringify(data),
-      timeoutMs: 20_000,
+      timeoutMs: 60_000,
     }),
   /** Import a versioned Claude credential object or bundle. */
   importClaudeCredentialBundle: (

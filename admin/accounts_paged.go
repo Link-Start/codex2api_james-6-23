@@ -1434,7 +1434,9 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 			summary.APIKey++
 		}
 		if item.Claude {
-			if item.ClaudeAuthKind == auth.ClaudeAuthKindSetupToken {
+			if item.ClaudeAuthKind == auth.ClaudeAuthKindAPIKey {
+				summary.APIKey++
+			} else if item.ClaudeAuthKind == auth.ClaudeAuthKindSetupToken {
 				summary.SetupToken++
 			} else {
 				summary.OAuth++

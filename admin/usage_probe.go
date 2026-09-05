@@ -188,7 +188,7 @@ func selectClaudeUsageProbeModel(account *auth.Account) (string, error) {
 // returned to the import queue but does not itself ban the account; a
 // credits_required response is recorded as a model-only cooldown.
 func (h *Handler) probeUsageViaClaudeMessages(ctx context.Context, account *auth.Account) (probeErr error) {
-	if account == nil {
+	if account == nil || account.IsClaudeAPIKey() {
 		return nil
 	}
 	var oauthWindows []auth.ClaudeUsageWindow
@@ -299,6 +299,9 @@ func (h *Handler) probeUsageViaClaudeMessages(ctx context.Context, account *auth
 func (h *Handler) fetchClaudeOAuthUsage(ctx context.Context, account *auth.Account) ([]auth.ClaudeUsageWindow, error) {
 	if account == nil {
 		return nil, errors.New("Claude usage 缺少账号")
+	}
+	if account.IsClaudeAPIKey() {
+		return nil, nil
 	}
 	proxyURL := ""
 	if h != nil && h.store != nil {

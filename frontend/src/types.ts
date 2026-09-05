@@ -10,7 +10,7 @@ export interface VisibleChannelsSettings {
 }
 
 /** Claude 凭据形态:oauth=可刷新 OAuth;setup_token=长效 Setup Token(仅推理,1 年,无 RT)。 */
-export type ClaudeAuthKind = 'oauth' | 'setup_token'
+export type ClaudeAuthKind = 'oauth' | 'setup_token' | 'api_key'
 
 /** Claude Code OAuth：第一步返回授权 URL 与 state。 */
 export interface ClaudeAuthURLResponse {
@@ -53,7 +53,10 @@ export interface ClaudeExchangeCodeRequest {
 
 /** Claude Code：直接导入 cmd/claude_login 产出的 token JSON。 */
 export interface ClaudeImportTokenRequest {
-  access_token: string
+  access_token?: string
+  api_key?: string
+  auth_kind?: ClaudeAuthKind
+  base_url?: string
   /** OAuth 凭据必填;Setup Token(auth_kind=setup_token)没有 RT。 */
   refresh_token?: string
   email?: string
@@ -68,6 +71,7 @@ export interface ClaudeImportTokenRequest {
 /** Versioned, provider-scoped Claude OAuth export. Secret-bearing fields are
  * only returned by the administrator-only Claude export endpoint. */
 export interface ClaudeCredentialExportEntry extends ClaudeImportTokenRequest {
+  access_token: string
   type: 'claude'
   version: number
   auth_kind: ClaudeAuthKind
@@ -222,6 +226,7 @@ export interface AccountRow {
   claude_api?: boolean
   /** Claude 凭据形态(仅 Claude 账号有值)。 */
   claude_auth_kind?: ClaudeAuthKind | string
+  claude_base_url?: string
   antigravity_auth_kind?: 'oauth' | 'api_key' | string
   agent_identity?: boolean
   grok_auth_kind?: string

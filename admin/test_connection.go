@@ -425,6 +425,9 @@ func (h *Handler) handleClaudeConnectionTest(
 	id int64,
 ) {
 	recorder := newClaudeTestRecorder(resp, testModel, fingerprintMode, account.GetAccessToken(), start)
+	if account.IsClaudeAPIKey() {
+		recorder.details.FingerprintMode = ""
+	}
 	// The final diagnostics follow the terminal result; clients must drain the
 	// SSE response before refreshing the invalidated account snapshot.
 	defer func() { sendTestEvent(c, testEvent{Type: "diagnostics", Diagnostics: recorder.finish()}) }()

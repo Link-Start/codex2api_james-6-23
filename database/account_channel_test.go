@@ -207,6 +207,12 @@ func TestSQLiteListAccountListProjectionCarriesClaudeAuthKind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	apiID, err := db.InsertAccountWithUpstream(ctx, "claude-api", "anthropic", "claude", map[string]interface{}{
+		"upstream_type": "claude", "claude_auth_kind": "api_key", "claude_base_url": "https://example.com/v1", "access_token": "api-secret",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	rows, err := db.ListAccountListProjection(ctx, UpstreamChannelClaude)
 	if err != nil {
 		t.Fatal(err)
@@ -214,6 +220,9 @@ func TestSQLiteListAccountListProjectionCarriesClaudeAuthKind(t *testing.T) {
 	byID := map[int64]*AccountRow{}
 	for _, row := range rows {
 		byID[row.ID] = row
+	}
+	if got := byID[apiID]; got == nil || got.GetCredential("claude_auth_kind") != "api_key" || got.GetCredential("access_token") != "" || got.GetCredential("refresh_token") != "" {
+		t.Fatal("API key projection must carry auth kind without secret credentials")
 	}
 	if got := byID[setupID].GetCredential("claude_auth_kind"); got != "setup_token" {
 		t.Fatalf("setup token projection auth kind = %q", got)
