@@ -58,13 +58,16 @@ type Handler struct {
 	// executeClaudeUsageProbe is injectable for tests; production uses the
 	// provider-native Anthropic Messages request directly.
 	executeClaudeUsageProbe func(context.Context, *auth.Account, []byte) (*http.Response, error)
-	activate5hWindow        func(context.Context, *auth.Account) error
-	executeUsageProbe       usageProbeRequestFunc
-	syncAccountPlanOnReset  func(context.Context, *auth.Account) error
-	queryResetCredits       func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error)
-	consumeResetCredit      func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error)
-	queryWhamDailyUsage     func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyUsageResponse, *http.Response, error)
-	sendCodexInvite         func(context.Context, *auth.Account, string, string, string, []string) (*proxy.CodexInviteResult, error)
+	// refreshClaudeTokensForImport is injectable for tests; production uses the
+	// real platform.claude.com refresh grant (see refreshClaudeCredentialsForImport).
+	refreshClaudeTokensForImport func(ctx context.Context, proxyURL, refreshToken string) (*auth.ClaudeTokenData, error)
+	activate5hWindow             func(context.Context, *auth.Account) error
+	executeUsageProbe            usageProbeRequestFunc
+	syncAccountPlanOnReset       func(context.Context, *auth.Account) error
+	queryResetCredits            func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error)
+	consumeResetCredit           func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error)
+	queryWhamDailyUsage          func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyUsageResponse, *http.Response, error)
+	sendCodexInvite              func(context.Context, *auth.Account, string, string, string, []string) (*proxy.CodexInviteResult, error)
 	// 列表 page-stats 发现当前页缺少官方结算快照时，按账号做即时回补；
 	// last/in-flight 避免翻页或前端重试把同一号打爆上游，failedAt 给持续
 	// 失败的账号更长的冷却，syncedOnce 记录「成功同步过但上游没有数据」
@@ -1077,7 +1080,10 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/grok/oauth/exchange-code", h.ExchangeGrokOAuthCode) // 兼容旧客户端
 	api.POST("/accounts/claude/oauth/auth-url", h.GenerateClaudeAuthURL)
 	api.POST("/accounts/claude/oauth/exchange-code", h.ExchangeClaudeOAuthCode)
+	api.POST("/accounts/claude/oauth/exchange-session-key", h.ExchangeClaudeSessionKey)
 	api.POST("/accounts/claude/import", h.ImportClaudeToken)
+	api.POST("/accounts/claude/import-setup-tokens", h.ImportClaudeSetupTokens) // 兼容旧名:同时接受 oat01/ort01
+	api.POST("/accounts/claude/import-tokens", h.ImportClaudeSetupTokens)
 	api.GET("/accounts/claude/export", h.ExportClaudeAccounts)
 	api.POST("/accounts/:id/claude/models", h.RefreshClaudeModels)
 	api.POST("/accounts/claude/models/refresh", h.RefreshAllClaudeModels)
@@ -1561,6 +1567,7 @@ type accountResponse struct {
 	GrokAPI                       bool                        `json:"grok_api,omitempty"`
 	AntigravityAPI                bool                        `json:"antigravity_api,omitempty"`
 	ClaudeAPI                     bool                        `json:"claude_api,omitempty"`
+	ClaudeAuthKind                string                      `json:"claude_auth_kind,omitempty"`
 	AntigravityAuthKind           string                      `json:"antigravity_auth_kind,omitempty"`
 	AgentIdentity                 bool                        `json:"agent_identity,omitempty"`
 	GrokAuthKind                  string                      `json:"grok_auth_kind,omitempty"`

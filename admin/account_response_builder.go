@@ -221,6 +221,7 @@ func (h *Handler) buildAccountResponse(
 		GrokAPI:                      isGrokAccount,
 		AntigravityAPI:               isAntigravityAccount,
 		ClaudeAPI:                    isClaudeAccount,
+		ClaudeAuthKind:               claudeAuthKindForRow(row, isClaudeAccount),
 		AntigravityAuthKind:          antigravityAuthKind,
 		AgentIdentity:                isAgentIdentityCredentialRow(row),
 		GrokAuthKind:                 grokAuthKind,

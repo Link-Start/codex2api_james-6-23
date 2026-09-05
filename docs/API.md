@@ -774,24 +774,58 @@ Claude Code OAuth 账号使用原生 Anthropic Messages 上游，不会进入 Co
 Token、授权码和账号 ID 仅为占位符，服务端不会在响应或日志中回显 access/refresh
 token。
 
+Claude 账号有两种凭据形态，记录在 `credentials.claude_auth_kind`，列表/详情响应以
+`claude_auth_kind` 回传，账号列表 `auth_kind` 筛选与 `summary.oauth / summary.setup_token`
+按此区分：
+
+- `oauth`：完整 Claude Code OAuth，`access_token + refresh_token`，AT 临期自动续期，
+  可读 profile / 官方 usage 端点；历史账号未写该键时一律视为 `oauth`。
+- `setup_token`：官方 `claude setup-token` 同款长效令牌（`sk-ant-oat01-…`），仅
+  `user:inference` scope，有效期 1 年，没有 refresh token，到期只能重新授权；用量改由
+  原生 Messages 探针采样，套餐信息缺省。适合批量号池。
+
 #### POST /api/admin/accounts/claude/oauth/auth-url
 
-创建一次性 PKCE 登录会话，返回授权地址与 `state`。`state` 默认 15 分钟有效且只能
-兑换一次。
+创建一次性 PKCE 登录会话，返回授权地址与 `state`。请求体可选 `{"mode":"oauth"|"setup_token"}`，
+默认 `oauth`；`setup_token` 只申请 `user:inference` 并在交换时请求 1 年有效期。回调地址
+为托管页 `https://platform.claude.com/oauth/code/callback`，授权后页面直接展示 `code#state`
+供复制（响应同时回传 `mode` 与 `redirect_uri`）。`state` 默认 15 分钟有效且只能兑换一次。
 
 #### POST /api/admin/accounts/claude/oauth/exchange-code
 
-使用 `state` 与回调 `code` 换取 Claude OAuth 凭据并入库。可选 `proxy_url`、
-`use_proxy_pool`、`timezone` 和 `name`；入库后会异步执行一次受控原生 Messages
-用量采样。
+使用 `state` 与回调 `code`（接受 `code#state`、纯 code 或整条回调 URL）换取 Claude
+凭据并入库，形态沿用生成链接时的 `mode`。可选 `proxy_url`、`use_proxy_pool`、
+`timezone` 和 `name`；入库后会异步执行一次受控原生 Messages 用量采样。
+
+#### POST /api/admin/accounts/claude/oauth/exchange-session-key
+
+用从已登录 claude.ai 浏览器复制的 `session_key`（sessionKey cookie，接受
+`sessionKey=...` 整段）一键换号：服务端代替浏览器完成组织选择、PKCE 授权与 token
+交换后直接入库，`mode` 同上决定换出 OAuth 凭据或 Setup Token。sessionKey 不落库、
+不回显，换号成功后即可作废。前两步打 claude.ai 网页端，走账号代理并使用浏览器指纹
+客户端；401/403 表示 sessionKey 失效，3xx 视为被 Cloudflare 拦截。
 
 #### POST /api/admin/accounts/claude/import
 
 直接导入 `cmd/claude_login -out` 生成的 JSON，或下面导出端点生成的 version 1
-Claude 凭据。`access_token` 与 `refresh_token` 必填；同时接受单对象、对象数组和
-`{"accounts":[...]}`。单对象保持历史 `{message,id,email}` 响应，批量导入返回
-`total`、`imported`、`failed` 与逐账号 `items/warnings`。`auth_kind` 仅允许
-`oauth`，模型列表仅允许 `claude-*`。
+Claude 凭据。同时接受单对象、对象数组和 `{"accounts":[...]}`。单对象保持历史
+`{message,id,email}` 响应，批量导入返回 `total`、`imported`、`failed` 与逐账号
+`items/warnings`。`auth_kind` 允许 `oauth`（默认，`refresh_token` 必填，`access_token` 可缺省——
+缺省时服务端先用 RT 走 refresh 授权换出 AT 并补齐邮箱/账号 UUID/套餐，RT 无效返回
+502）或 `setup_token`（只需 `access_token`，`expires_at` 缺省为 1 年）；未声明
+`auth_kind` 且没有 `refresh_token` 的文档仅当 `access_token` 形如 `sk-ant-oat01-`
+才按 `setup_token` 接受。模型列表仅允许 `claude-*`。
+
+#### POST /api/admin/accounts/claude/import-tokens
+
+（旧名 `/import-setup-tokens` 仍可用。）批量粘贴令牌：`text`（任意分隔的自由文本）
+与 `tokens` 数组都会按前缀抽取、保序去重，单次最多 200 枚。`sk-ant-oat01-` 按
+`setup_token` 长效令牌入库；`sk-ant-ort01-` 是 OAuth refresh token，入库前先刷新换出
+AT，按 `oauth` 形态保存，备注默认取邮箱。可选 `name`（Setup Token 的备注前缀，默认
+`claude`，按现有 `<prefix>-N` 最大序号继续编号；单枚且给了 `name` 时直接用作备注）、
+`proxy_url` / `use_proxy_pool`（代理池模式下每枚令牌各取一条）、`timezone`、
+`group_refs`。返回与批量导入相同的 `total/imported/failed/items`；同一令牌（Setup
+Token 按 AT、Refresh Token 刷新后按账号 UUID/RT）已存在返回 409（多枚时逐项失败）。
 
 导入文件可恢复账号名称、代理、时区、标签、启用状态、账号级指纹模式和受限身份头。
 分组使用 `group_refs: [{"name":"...","channel":"claude"}]` 按名称映射；不会复用
@@ -806,7 +840,7 @@ Claude 凭据。`access_token` 与 `refresh_token` 必填；同时接受单对�
 `X-Export-Count`、`Cache-Control: no-store, max-age=0`、`Pragma: no-cache` 和
 `X-Content-Type-Options: nosniff`。
 
-version 1 文档包含 `type=claude`、`auth_kind=oauth`、access/refresh token、账号 ID、
+version 1 文档包含 `type=claude`、`auth_kind`（`oauth` 或 `setup_token`，后者 `refresh_token` 为空）、access/refresh token、账号 ID、
 过期时间、套餐、模型、代理、时区、`claude_fingerprint_mode`、标签、启用状态及
 `group_refs`。`fingerprint_headers` 允许 `User-Agent`、`X-App` 和
 `X-Stainless-*` 身份头，以及可选的 `claude_device_id` 账号身份元数据；后者兼容键名大小写，

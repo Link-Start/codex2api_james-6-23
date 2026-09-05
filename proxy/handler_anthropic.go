@@ -1623,6 +1623,9 @@ func (h *Handler) Messages(c *gin.Context) {
 
 		resp.Body.Close()
 		syncAnthropicUsageStateForAccount(h.store, account, resp)
+		if !outcome.penalize && outcome.logStatusCode == http.StatusOK && account.IsClaudeOAuth() {
+			NoteClaudeGatedModelSuccess(h.store, account, attemptEffectiveModel)
+		}
 		if outcome.penalize {
 			recyclePooledClient(account, proxyURL)
 			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)

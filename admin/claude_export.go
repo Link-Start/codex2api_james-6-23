@@ -113,6 +113,8 @@ type claudeImportDocument struct {
 // claudeAccountImportOptions carries metadata that is not part of
 // auth.ClaudeTokenData.  It is consumed by the common account creation path.
 type claudeAccountImportOptions struct {
+	// AuthKind 是凭据形态(oauth / setup_token);空=按是否有 RT 推断。
+	AuthKind           string
 	Models             []string
 	PlanType           string
 	FingerprintMode    string
@@ -367,13 +369,18 @@ func claudeAccountRowToExportEntry(row *database.AccountRow, groupRefs []claudeG
 	}
 	accessToken := strings.TrimSpace(row.GetCredential("access_token"))
 	refreshToken := strings.TrimSpace(row.GetCredential("refresh_token"))
-	if accessToken == "" || refreshToken == "" {
+	if accessToken == "" {
+		return claudeExportEntry{}, false
+	}
+	authKind := auth.InferClaudeAuthKind(row.GetCredential(auth.ClaudeAuthKindCredentialKey), accessToken, refreshToken)
+	if authKind == auth.ClaudeAuthKindOAuth && refreshToken == "" {
+		// 一个没有 RT 的「OAuth」行只剩即将过期的 AT,导出到别处也无法续期。
 		return claudeExportEntry{}, false
 	}
 	entry := claudeExportEntry{
 		Type:                  "claude",
 		Version:               claudeCredentialExportVersion,
-		AuthKind:              "oauth",
+		AuthKind:              authKind,
 		Email:                 strings.TrimSpace(row.GetCredential("email")),
 		Name:                  row.Name,
 		AccessToken:           accessToken,
@@ -706,13 +713,35 @@ func claudeImportDocumentFromWire(raw claudeImportWire) (claudeImportDocument, e
 		return claudeImportDocument{}, fmt.Errorf("unsupported Claude credential version %d", raw.Version)
 	}
 	authKind := strings.ToLower(strings.TrimSpace(raw.AuthKind))
-	if authKind != "" && authKind != "oauth" {
-		return claudeImportDocument{}, errors.New("Claude credential auth_kind must be oauth")
+	if !auth.IsValidClaudeAuthKind(authKind) {
+		return claudeImportDocument{}, errors.New("Claude credential auth_kind must be oauth or setup_token")
 	}
 	accessToken := strings.TrimSpace(raw.AccessToken)
 	refreshToken := strings.TrimSpace(raw.RefreshToken)
-	if accessToken == "" || refreshToken == "" {
-		return claudeImportDocument{}, errors.New("Claude credential requires access_token and refresh_token")
+	if accessToken == "" && refreshToken == "" {
+		return claudeImportDocument{}, errors.New("Claude credential requires access_token or refresh_token")
+	}
+	// 形态推断:未声明 auth_kind 时,有 RT 视为 oauth(AT 可缺省,入库前用 RT 刷出);
+	// 无 RT 仅当 AT 形如官方 Setup Token(sk-ant-oat01-)才视为 setup_token,否则拒绝——
+	// 避免把一个 1 小时就过期的裸 OAuth AT 误当长效令牌。
+	if authKind == "" {
+		switch {
+		case refreshToken != "":
+			authKind = auth.ClaudeAuthKindOAuth
+		case auth.LooksLikeClaudeSetupToken(accessToken):
+			authKind = auth.ClaudeAuthKindSetupToken
+		default:
+			return claudeImportDocument{}, errors.New("Claude credential requires refresh_token (or auth_kind=setup_token)")
+		}
+	}
+	if authKind == auth.ClaudeAuthKindOAuth && refreshToken == "" {
+		return claudeImportDocument{}, errors.New("Claude oauth credential requires refresh_token")
+	}
+	if authKind == auth.ClaudeAuthKindSetupToken {
+		if accessToken == "" {
+			return claudeImportDocument{}, errors.New("Claude setup_token credential requires access_token")
+		}
+		refreshToken = ""
 	}
 	for _, metadata := range []struct {
 		field    string
