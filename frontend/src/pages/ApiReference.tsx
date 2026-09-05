@@ -1750,8 +1750,8 @@ data: {"type":"done","available":["claude-haiku-4-5"]}` },
         path="/api/admin/accounts/:id/test?model=claude-haiku-4-5"
         title={copy('测试 Claude 账号连接', 'Test a Claude account connection')}
         description={copy(
-          '执行一次最小原生 Messages SSE 测试，返回 test_start、content、error 或 test_complete 事件。与模型探测不同，手动测连会同步真实账号状态和限流信息。',
-          'Run a minimal native Messages SSE request and emit test_start, content, error, or test_complete events. Unlike capability probing, a manual connection test synchronizes the real account status and rate-limit information.',
+          '执行一次最小 SSE 测连，返回 test_start、content、diagnostics、error 或 test_complete 事件。与模型探测不同，手动测连会同步真实账号状态和限流信息。diagnostics 事件按渠道携带诊断对象：Claude 账号为 diagnostics 字段，Codex / Responses 账号为 codex_diagnostics 字段（HTTP 状态、分段耗时、x-codex 用量窗口、终态 usage、白名单响应头与脱敏正文预览）；最终诊断帧可能位于终止事件之后，需读到 SSE 关闭。',
+          'Run a minimal SSE connection test and emit test_start, content, diagnostics, error, or test_complete events. Unlike capability probing, a manual connection test synchronizes the real account status and rate-limit information. The diagnostics event carries a channel-specific object: Claude accounts use the diagnostics field, Codex / Responses accounts use codex_diagnostics (HTTP status, phase timings, x-codex usage windows, final usage, whitelisted response headers and a redacted body preview); the final diagnostics frame may follow the terminal event, so drain the stream to SSE close.',
         )}
         apiKey={firstKey}
         baseUrl={baseUrl}
