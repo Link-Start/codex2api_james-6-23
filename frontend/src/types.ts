@@ -1429,6 +1429,26 @@ export interface WhamDailyUsageSplit {
   text_total_tokens?: number
 }
 
+// 单个 (model, speed) 在某一天的份额（wham daily-token-usage-breakdown 落库后按天换算）。
+// share 是当天内部的占比（0~1），只对这一天有意义，不能跨天相加；
+// credits/usd 是后端已按 share 分摊好的当天官方成本，跨天累加用这两个。
+// free 套餐 credits 恒为 0，但 share 仍然有效。speed 为 fast 即 priority 档。
+export interface WhamDailyUsageBreakdownEntry {
+  model: string
+  speed: 'standard' | 'fast' | string
+  share: number
+  credits: number
+  usd: number
+}
+
+// 按产品入口（cli / desktop_app / vscode / exec / web …）的当天份额，语义同上。
+export interface WhamDailyUsageSurfaceEntry {
+  surface: string
+  share: number
+  credits: number
+  usd: number
+}
+
 export interface WhamDailyUsageItem {
   day: string
   credits: number
@@ -1440,10 +1460,39 @@ export interface WhamDailyUsageItem {
   cached_input_tokens: number
   output_tokens: number
   total_tokens: number
-  // 当天的记录在上游结算前不含 token 明细，settled=false 时 token 数还不可信。
+  // settled=false 表示这天还在结算（当天 UTC 的行恒为未结算）：token 与 credits 可能
+  // 已经有值，但全天都在变，隔天回补后才稳定。
   settled: boolean
   clients: WhamDailyUsageSplit[]
   models: WhamDailyUsageSplit[]
+  // 模型×速度拆分是否已同步到这一天；旧快照没有这三个字段。
+  breakdown_available?: boolean
+  breakdown?: WhamDailyUsageBreakdownEntry[]
+  surfaces?: WhamDailyUsageSurfaceEntry[]
+}
+
+// 当前重置周期的官方成本与额度估算。估算 = 本周期已用官方成本 ÷ 实时已用百分比；
+// 百分比是整数，区间按 ±0.5% 推算，低于 10% 时不可靠。
+export interface WhamDailyUsageCycle {
+  // 窗口信息与实时百分比都拿到了；false 时看 reason。
+  available: boolean
+  reason?: 'no_window' | 'window_stale' | 'no_percent' | 'no_credits' | 'percent_too_low' | string
+  start_at?: string
+  reset_at?: string
+  window_seconds?: number
+  window_kind?: 'weekly' | 'monthly' | ''
+  used_percent?: number
+  used_percent_updated_at?: string
+  used_credits: number
+  used_usd: number
+  // 本周期内有官方结算数据的天数。
+  days: number
+  estimate?: {
+    usd: number
+    usd_low: number
+    usd_high: number
+    reliable: boolean
+  }
 }
 
 export interface WhamDailyUsageResponse {
@@ -1456,9 +1505,15 @@ export interface WhamDailyUsageResponse {
     turns: number
   }
   credits_per_usd: number
+  // 上游可回溯的天数（首次同步的深回补窗口），更早的历史只存在于本地快照。
   retention_days: number
   last_synced_at?: string
+  // counts 端点刷新失败的原因（此时展示的是已存快照）。
   refresh_error?: string
+  // 仅模型拆分端点刷新失败：counts 已刷新成功，只是按模型的成本可能落后一轮。
+  breakdown_refresh_error?: string
+  // 当前重置周期（7d 或月窗）的已用官方成本与额度估算；只有拿到窗口信息的 Codex OAuth 账号才有。
+  cycle?: WhamDailyUsageCycle
 }
 
 export interface AccountUsageDayStat {

@@ -11,6 +11,7 @@ import ChannelLogo from '../components/ChannelLogo'
 import CompactionBadges from '../components/CompactionBadges'
 import ModelLogo from '../components/ModelLogo'
 import Modal from '../components/Modal'
+import ColumnSettingsMenu from '../components/ColumnSettingsMenu'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
@@ -1519,6 +1520,9 @@ const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string 
   { key: 'time', labelKey: 'usage.tableTime' },
 ]
 
+// 列设置菜单按这个顺序列出可选列，与表头顺序一致。
+const USAGE_TABLE_COLUMN_ORDER: readonly UsageTableColumn[] = USAGE_COLUMN_DEFINITIONS.map((column) => column.key)
+
 const USAGE_VISIBLE_COLUMNS_KEY = 'codex2api:usage:visible-columns'
 const DEFAULT_USAGE_VISIBLE_COLUMNS: Record<UsageTableColumn, boolean> = {
   status: true,
@@ -1738,60 +1742,6 @@ function persistUsageVisibleColumns(columns: Record<UsageTableColumn, boolean>) 
   try { localStorage.setItem(USAGE_VISIBLE_COLUMNS_KEY, JSON.stringify(columns)) } catch { /* ignore */ }
 }
 
-function ColumnSettingsDropdown({
-  open,
-  columns,
-  onOpenChange,
-  onToggle,
-}: {
-  open: boolean
-  columns: Record<UsageTableColumn, boolean>
-  onOpenChange: (open: boolean) => void
-  onToggle: (key: UsageTableColumn) => void
-}) {
-  const { t } = useTranslation()
-
-  return (
-    <div className="relative">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => onOpenChange(!open)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        <SlidersHorizontal className="size-3.5" />
-        {t('accounts.columnSettings', { defaultValue: 'Columns' })}
-      </Button>
-      {open ? (
-        <div
-          role="menu"
-          className="absolute right-0 z-20 mt-2 w-56 max-w-[calc(100vw-2.5rem)] rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
-        >
-          <div className="mb-1 px-2 py-1 text-[11px] font-semibold uppercase text-muted-foreground">
-            {t('accounts.columnSettings', { defaultValue: 'Columns' })}
-          </div>
-          {USAGE_COLUMN_DEFINITIONS.map((column) => (
-            <label
-              key={column.key}
-              className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-muted"
-            >
-              <input
-                type="checkbox"
-                className="size-3.5 rounded border-border"
-                checked={columns[column.key]}
-                onChange={() => onToggle(column.key)}
-              />
-              <span>{t(column.labelKey)}</span>
-            </label>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
 export default function Usage() {
   const { t } = useTranslation()
   const { toast, showToast } = useToast()
@@ -1829,7 +1779,11 @@ export default function Usage() {
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS
   const searchTimer = useRef<ReturnType<typeof setTimeout>>(null)
   const [visibleColumns, setVisibleColumns] = useState<Record<UsageTableColumn, boolean>>(getInitialUsageVisibleColumns)
-  const [columnSettingsOpen, setColumnSettingsOpen] = useState(false)
+  // 列设置菜单与账号管理页共用同一个组件，标签按当前语言从列定义里取。
+  const usageColumnLabels = useMemo(
+    () => Object.fromEntries(USAGE_COLUMN_DEFINITIONS.map((column) => [column.key, t(column.labelKey)])) as Record<UsageTableColumn, string>,
+    [t],
+  )
   const [showAnalysis, setShowAnalysis] = useState(getInitialAnalysisVisibility)
   const [channel, setChannel] = useUsageChannel()
 
@@ -2486,11 +2440,14 @@ export default function Usage() {
                 ) : null}
 
                 <div className="ml-auto shrink-0">
-                  <ColumnSettingsDropdown
-                    open={columnSettingsOpen}
+                  <ColumnSettingsMenu
+                    columnOrder={USAGE_TABLE_COLUMN_ORDER}
                     columns={visibleColumns}
-                    onOpenChange={setColumnSettingsOpen}
+                    labels={usageColumnLabels}
                     onToggle={(key) => setVisibleColumns((current) => ({ ...current, [key]: !current[key] }))}
+                    onReset={() => setVisibleColumns({ ...DEFAULT_USAGE_VISIBLE_COLUMNS })}
+                    title={t('accounts.columnSettings')}
+                    resetTitle={t('accounts.columnReset')}
                   />
                 </div>
               </div>
