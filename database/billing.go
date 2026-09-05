@@ -598,7 +598,7 @@ func geminiFamilyPricing(model string) *ModelPricing {
 
 func usePriorityPricing(serviceTier string, pricing *ModelPricing) bool {
 	tier := normalizeServiceTier(serviceTier)
-	if tier != "priority" && tier != "fast" {
+	if tier != "priority" && tier != "fast" && tier != "ultrafast" {
 		return false
 	}
 	return pricing.InputPricePerMTokenPriority > 0 ||
@@ -608,7 +608,9 @@ func usePriorityPricing(serviceTier string, pricing *ModelPricing) bool {
 
 func serviceTierCostMultiplier(serviceTier string) float64 {
 	switch normalizeServiceTier(serviceTier) {
-	case "priority", "fast":
+	// Ultrafast follows this gateway's Fast pricing policy, including custom
+	// priority prices. This is a billing default, not an official tariff claim.
+	case "priority", "fast", "ultrafast":
 		return 2.0
 	case "flex":
 		return 0.5

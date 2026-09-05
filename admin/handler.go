@@ -1534,22 +1534,23 @@ func isDashboardRateLimitedAccount(status string, cooldownReason string) bool {
 // ==================== Accounts ====================
 
 type accountResponse struct {
-	DetailLoaded          bool   `json:"detail_loaded,omitempty"`
-	ID                    int64  `json:"id"`
-	Name                  string `json:"name"`
-	Email                 string `json:"email"`
-	EmailDomain           string `json:"email_domain,omitempty"`
-	ChatGPTAccountID      string `json:"chatgpt_account_id,omitempty"`
-	TokenWorkspaceID      string `json:"token_workspace_id,omitempty"`
-	WorkspaceIDOverride   string `json:"workspace_id_override,omitempty"`
-	EffectiveWorkspaceID  string `json:"effective_workspace_id,omitempty"`
-	PlanType              string `json:"plan_type"`
-	SubscriptionExpiresAt string `json:"subscription_expires_at,omitempty"`
-	Status                string `json:"status"`
-	ErrorMessage          string `json:"error_message,omitempty"`
-	ATOnly                bool   `json:"at_only"`
-	CreditEnabled         bool   `json:"credit_enabled"`
-	CreditSkipUsageWindow bool   `json:"credit_skip_usage_window"`
+	UpstreamRequestIDHeader string `json:"upstream_request_id_header"`
+	DetailLoaded            bool   `json:"detail_loaded,omitempty"`
+	ID                      int64  `json:"id"`
+	Name                    string `json:"name"`
+	Email                   string `json:"email"`
+	EmailDomain             string `json:"email_domain,omitempty"`
+	ChatGPTAccountID        string `json:"chatgpt_account_id,omitempty"`
+	TokenWorkspaceID        string `json:"token_workspace_id,omitempty"`
+	WorkspaceIDOverride     string `json:"workspace_id_override,omitempty"`
+	EffectiveWorkspaceID    string `json:"effective_workspace_id,omitempty"`
+	PlanType                string `json:"plan_type"`
+	SubscriptionExpiresAt   string `json:"subscription_expires_at,omitempty"`
+	Status                  string `json:"status"`
+	ErrorMessage            string `json:"error_message,omitempty"`
+	ATOnly                  bool   `json:"at_only"`
+	CreditEnabled           bool   `json:"credit_enabled"`
+	CreditSkipUsageWindow   bool   `json:"credit_skip_usage_window"`
 	// UsingCredits 是与 Status 并列的独立信号：用量窗口已打满但积分顶着，
 	// 状态仍是 active（可调度），前端据此在状态徽章旁并列一个「使用积分」徽章。
 	UsingCredits                  bool                        `json:"using_credits,omitempty"`
@@ -2021,6 +2022,7 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 }
 
 type updateAccountSchedulerReq struct {
+	UpstreamRequestIDHeader json.RawMessage `json:"upstream_request_id_header"`
 	ScoreBiasOverride       json.RawMessage `json:"score_bias_override"`
 	BaseConcurrencyOverride json.RawMessage `json:"base_concurrency_override"`
 	SkipWarmTier            json.RawMessage `json:"skip_warm_tier"`
@@ -2175,7 +2177,14 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
+	requestIDHeader, err := parseOptionalStringField(req.UpstreamRequestIDHeader, "upstream_request_id_header", auth.ValidateUpstreamRequestIDHeader)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
 	credentialUpdates := make(map[string]interface{})
+	if requestIDHeader.Set {
+		credentialUpdates[auth.UpstreamRequestIDHeaderCredentialKey] = strings.TrimSpace(requestIDHeader.Value)
+	}
 	if customHeaders.Set {
 		credentialUpdates["custom_headers"] = cloneCustomHeaders(customHeaders.Values)
 	}
@@ -2593,6 +2602,9 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	}
 	if update.ProxyURL.Set {
 		h.store.ApplyAccountProxyURL(id, update.ProxyURL.Value)
+	}
+	if value, ok := update.CredentialUpdates[auth.UpstreamRequestIDHeaderCredentialKey].(string); ok {
+		h.store.ApplyAccountUpstreamRequestIDHeader(id, value)
 	}
 	if update.CustomHeaders.Set {
 		h.store.ApplyAccountCustomHeaders(id, update.CustomHeaders.Values)
@@ -8011,18 +8023,20 @@ func parseUsageLogsFilter(c *gin.Context, startTime, endTime time.Time) (databas
 	}
 
 	filter := database.UsageLogFilter{
-		Start:     startTime,
-		End:       endTime,
-		Page:      1,
-		PageSize:  20,
-		Email:     strings.TrimSpace(c.Query("email")),
-		Model:     strings.TrimSpace(c.Query("model")),
-		Endpoint:  strings.TrimSpace(c.Query("endpoint")),
-		APIKeyID:  apiKeyID,
-		AccountID: accountID,
-		ErrorKind: strings.TrimSpace(c.Query("error_kind")),
-		Query:     strings.TrimSpace(c.Query("q")),
-		Channel:   parseUsageChannel(c),
+		RequestID:         strings.TrimSpace(c.Query("request_id")),
+		UpstreamRequestID: strings.TrimSpace(c.Query("upstream_request_id")),
+		Start:             startTime,
+		End:               endTime,
+		Page:              1,
+		PageSize:          20,
+		Email:             strings.TrimSpace(c.Query("email")),
+		Model:             strings.TrimSpace(c.Query("model")),
+		Endpoint:          strings.TrimSpace(c.Query("endpoint")),
+		APIKeyID:          apiKeyID,
+		AccountID:         accountID,
+		ErrorKind:         strings.TrimSpace(c.Query("error_kind")),
+		Query:             strings.TrimSpace(c.Query("q")),
+		Channel:           parseUsageChannel(c),
 	}
 
 	if pageStr := c.Query("page"); pageStr != "" {

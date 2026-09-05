@@ -261,7 +261,7 @@ func ExecuteClaudeMessagesRequestWithPolicy(ctx context.Context, account *auth.A
 	if err := ConsumeAPIKeyModelRequestQuota(ctx, model); err != nil {
 		return nil, err
 	}
-	resp, err := client.Do(req)
+	resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 	if err != nil {
 		if shouldRecyclePooledClient(err) {
 			recyclePooledClient(account, proxyURL)
