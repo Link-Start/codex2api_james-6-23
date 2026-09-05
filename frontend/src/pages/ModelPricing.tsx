@@ -1390,14 +1390,17 @@ export default function ModelPricing() {
                 const inputVal = normalizePrice(draft.input)
                 const outputVal = normalizePrice(draft.output)
                 const multiplier = getOutputMultiplier(inputVal, outputVal)
-                const advancedFields = r.model === 'gpt-6-astra'
-                  ? ADVANCED_FIELDS.filter((field) => !field.key.includes('_long'))
-                  : ADVANCED_FIELDS
-                const hasLongContextPricing =
+                const pricingModel = (r.canonical_model?.trim() || r.model.trim()).toLowerCase()
+                const supportsLongContextPricing = pricingModel !== 'gpt-6-astra'
+                const advancedFields = supportsLongContextPricing
+                  ? ADVANCED_FIELDS
+                  : ADVANCED_FIELDS.filter((field) => !field.key.includes('_long'))
+                const hasLongContextPricing = supportsLongContextPricing && (
                   normalizePrice(draft.long_context_threshold_tokens) > 0 ||
                   normalizePrice(draft.input_long) > 0 ||
                   normalizePrice(draft.cached_input_long) > 0 ||
                   normalizePrice(draft.output_long) > 0
+                )
 
                 return (
                   <article
