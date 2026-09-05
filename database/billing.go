@@ -56,16 +56,12 @@ var (
 	defaultModelPricing = &ModelPricing{InputPricePerMToken: 1.0, OutputPricePerMToken: 2.0}
 
 	modelPricingRules = []modelPricingRule{
-		// gpt-6-astra：官方定价页 standard $10/$50、缓存 $1；≥272K 长上下文
-		// $20/$75、缓存 $2。fast（priority）档恒为 standard 的 2×，由
-		// serviceTierCostMultiplier 兜底自动得出，无需显式配置。
+		// gpt-6-astra：Codex 长上下文例外，超过 272K 仍按 $10/$50、缓存 $1。
+		// 保留现有 fast（priority）2× 倍率，由 serviceTierCostMultiplier 兜底。
 		{model: "gpt-6-astra", pricing: ModelPricing{
-			InputPricePerMToken:         10.0,
-			OutputPricePerMToken:        50.0,
-			CacheReadPricePerMToken:     1.0,
-			LongInputPricePerMToken:     20.0,
-			LongOutputPricePerMToken:    75.0,
-			LongCacheReadPricePerMToken: 2.0,
+			InputPricePerMToken:     10.0,
+			OutputPricePerMToken:    50.0,
+			CacheReadPricePerMToken: 1.0,
 		}},
 		{model: "gpt-5.5", pricing: ModelPricing{
 			InputPricePerMToken:                 5.0,
