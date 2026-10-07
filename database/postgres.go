@@ -221,12 +221,12 @@ type DB struct {
 	logWg   sync.WaitGroup
 
 	// 缓冲溢出/脏数据丢弃的累计条数，暴露在运行状态里供运维观察
-	usageLogDropped   int64
+	usageLogDropped   atomic.Int64
 	usageLogDropLogAt time.Time // 溢出日志的限流时间戳，由 logMu 保护
 
 	usageLogMode          atomic.Value // string: full|errors|off
-	usageLogBatchSize     int64
-	usageLogFlushInterval int64 // ns
+	usageLogBatchSize     atomic.Int64
+	usageLogFlushInterval atomic.Int64 // ns
 	logFlushNotify        chan struct{}
 	accountInsertMu       sync.Mutex
 	sqliteWriteSem        chan struct{}
@@ -988,8 +988,8 @@ func (db *DB) SetUsageLogConfig(mode string, batchSize int, flushIntervalSeconds
 	batchSize = NormalizeUsageLogBatchSize(batchSize)
 	flushIntervalSeconds = NormalizeUsageLogFlushIntervalSeconds(flushIntervalSeconds)
 	db.usageLogMode.Store(mode)
-	atomic.StoreInt64(&db.usageLogBatchSize, int64(batchSize))
-	atomic.StoreInt64(&db.usageLogFlushInterval, int64(time.Duration(flushIntervalSeconds)*time.Second))
+	db.usageLogBatchSize.Store(int64(batchSize))
+	db.usageLogFlushInterval.Store(int64(time.Duration(flushIntervalSeconds) * time.Second))
 }
 
 func (db *DB) GetUsageLogMode() string {
@@ -1006,7 +1006,7 @@ func (db *DB) GetUsageLogBatchSize() int {
 	if db == nil {
 		return defaultUsageLogBatchSize
 	}
-	n := int(atomic.LoadInt64(&db.usageLogBatchSize))
+	n := int(db.usageLogBatchSize.Load())
 	return NormalizeUsageLogBatchSize(n)
 }
 
@@ -1014,7 +1014,7 @@ func (db *DB) GetUsageLogFlushIntervalSeconds() int {
 	if db == nil {
 		return defaultUsageLogFlushIntervalSeconds
 	}
-	d := time.Duration(atomic.LoadInt64(&db.usageLogFlushInterval))
+	d := time.Duration(db.usageLogFlushInterval.Load())
 	if d <= 0 {
 		return defaultUsageLogFlushIntervalSeconds
 	}
@@ -1056,7 +1056,7 @@ func (db *DB) GetUsageLogRuntimeStats() UsageLogRuntimeStats {
 	stats.BufferCapacity = cap(db.logBuf)
 	db.logMu.Unlock()
 	stats.BufferLimit = usageLogBufferHardLimit
-	stats.DroppedTotal = atomic.LoadInt64(&db.usageLogDropped)
+	stats.DroppedTotal = db.usageLogDropped.Load()
 
 	return stats
 }
@@ -1065,7 +1065,7 @@ func (db *DB) getUsageLogFlushInterval() time.Duration {
 	if db == nil {
 		return time.Duration(defaultUsageLogFlushIntervalSeconds) * time.Second
 	}
-	d := time.Duration(atomic.LoadInt64(&db.usageLogFlushInterval))
+	d := time.Duration(db.usageLogFlushInterval.Load())
 	if d <= 0 {
 		return time.Duration(defaultUsageLogFlushIntervalSeconds) * time.Second
 	}
@@ -4396,7 +4396,7 @@ func (db *DB) trimUsageLogBufferLocked() {
 		return
 	}
 	db.logBuf = append(db.logBuf[:0], db.logBuf[overflow:]...)
-	total := atomic.AddInt64(&db.usageLogDropped, int64(overflow))
+	total := db.usageLogDropped.Add(int64(overflow))
 	if now := time.Now(); now.Sub(db.usageLogDropLogAt) >= 30*time.Second {
 		db.usageLogDropLogAt = now
 		log.Printf("用量日志缓冲已达上限 %d 条，丢弃最旧的 %d 条（累计丢弃 %d 条），请检查数据库是否可写",
@@ -4752,7 +4752,7 @@ func (db *DB) flushLogBatch(drain bool) bool {
 		// 脏数据重试多少次都写不进去，隔离出来丢掉，其余照常落库。
 		pending, dropped := db.salvageUsageLogBatch(ctx, batch, err)
 		if dropped > 0 {
-			total := atomic.AddInt64(&db.usageLogDropped, int64(dropped))
+			total := db.usageLogDropped.Add(int64(dropped))
 			log.Printf("批量写入命中写不进去的日志：已丢弃 %d 条（累计 %d 条），其余继续落库。首个错误: %v",
 				dropped, total, err)
 		}
